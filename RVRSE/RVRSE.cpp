@@ -351,7 +351,7 @@ bool StepControlParam(IControl* pControl, int direction, bool fine)
   if (!pControl || direction == 0)
     return false;
 
-  IParam* pParam = pControl->GetParam();
+  const IParam* pParam = pControl->GetParam();
   const int paramIdx = pControl->GetParamIdx();
   if (!pParam || paramIdx < 0)
     return false;
