@@ -343,7 +343,133 @@ private:
   IColor mAccent;
 };
 
-class ReleaseKnobControl final : public IVKnobControl
+/// Step a control's parameter by one notch from the UI thread (mouse wheel / arrow keys).
+/// Enums and integer params move by one entry; continuous params by ~1% of the range
+/// (the parameter's own step when `fine`). Returns true when the control has a parameter.
+bool StepControlParam(IControl* pControl, int direction, bool fine)
+{
+  if (!pControl || direction == 0)
+    return false;
+
+  IParam* pParam = pControl->GetParam();
+  const int paramIdx = pControl->GetParamIdx();
+  if (!pParam || paramIdx < 0)
+    return false;
+
+  double step = pParam->GetStep();
+  if (!fine && !pParam->GetStepped() && step < 1.0)
+    step = std::max(step, pParam->GetRange() / 100.0);
+
+  const double current = pParam->Value();
+  const double next = std::clamp(current + static_cast<double>(direction) * step,
+                                 pParam->GetMin(), pParam->GetMax());
+  if (next == current)
+    return true;
+
+  auto* pDelegate = pControl->GetDelegate();
+  pDelegate->BeginInformHostOfParamChangeFromUI(paramIdx);
+  pControl->SetValueFromUserInput(pParam->ToNormalized(next));
+  pDelegate->EndInformHostOfParamChangeFromUI(paramIdx);
+  return true;
+}
+
+/// Tab switch that also responds to the mouse wheel.
+class WheelTabControl final : public IVTabSwitchControl
+{
+public:
+  using IVTabSwitchControl::IVTabSwitchControl;
+
+  void OnMouseWheel(float x, float y, const IMouseMod& mod, float delta) override
+  {
+    (void) x;
+    (void) y;
+    if (delta != 0.0f)
+      StepControlParam(this, delta > 0.0f ? 1 : -1, mod.S || mod.C);
+  }
+};
+
+/// Popup menu button (preset selector) that also responds to the mouse wheel.
+class WheelMenuControl final : public IVMenuButtonControl
+{
+public:
+  using IVMenuButtonControl::IVMenuButtonControl;
+
+  void OnMouseWheel(float x, float y, const IMouseMod& mod, float delta) override
+  {
+    (void) x;
+    (void) y;
+    if (delta != 0.0f)
+      StepControlParam(this, delta > 0.0f ? 1 : -1, mod.S || mod.C);
+  }
+};
+
+/// Knob with a silver 3D body (drop shadow, rim, radial-lit face, concave centre dish),
+/// a tick ring whose active part is orange, and a dark navy pointer notch.
+class SilverKnobControl : public IVKnobControl
+{
+public:
+  using IVKnobControl::IVKnobControl;
+
+  void OnInit() override
+  {
+    IVKnobControl::OnInit();
+    mTrackToHandleDistance = 9.f; // leave room for the tick ring around the body
+  }
+
+  void DrawIndicatorTrack(IGraphics& g, float angle, float cx, float cy, float radius) override
+  {
+    constexpr int kNumTicks = 41;
+    const float span = mAngle2 - mAngle1;
+    const float fraction = span != 0.f ? (angle - mAngle1) / span : 0.f;
+
+    for (int i = 0; i < kNumTicks; ++i)
+    {
+      const float t = static_cast<float>(i) / static_cast<float>(kNumTicks - 1);
+      const bool active = t <= fraction + 1e-4f;
+      const bool major = (i % 10) == 0;
+      const IColor color = active ? rvrse::gui::kColorGold : rvrse::gui::kColorKnobTrack;
+      g.DrawRadialLine(color, cx, cy, mAngle1 + t * span,
+                       radius - (major ? 8.f : 5.f), radius, nullptr, major ? 2.f : 1.3f);
+    }
+  }
+
+  void DrawHandle(IGraphics& g, const IRECT& bounds) override
+  {
+    const float cx = bounds.MW();
+    const float cy = bounds.MH();
+    const float r = bounds.W() * 0.5f;
+
+    // Soft drop shadow
+    for (int i = 3; i >= 0; --i)
+      g.FillCircle(IColor(16, 0x1B, 0x22, 0x33), cx, cy + 2.5f, r + 0.5f + static_cast<float>(i) * 1.3f);
+
+    // Outer rim: bright at the top, darker at the bottom
+    g.PathCircle(cx, cy, r);
+    g.PathFill(IPattern::CreateLinearGradient(cx, cy - r, cx, cy + r,
+      {IColorStop(IColor(255, 0xFF, 0xFF, 0xFF), 0.f), IColorStop(IColor(255, 0xA9, 0xB1, 0xC2), 1.f)}));
+
+    // Body: radial light from the upper left
+    g.PathCircle(cx, cy, r * 0.90f);
+    g.PathFill(IPattern::CreateRadialGradient(cx - r * 0.28f, cy - r * 0.34f, r * 1.25f,
+      {IColorStop(IColor(255, 0xFD, 0xFE, 0xFF), 0.f),
+       IColorStop(IColor(255, 0xE2, 0xE7, 0xEF), 0.5f),
+       IColorStop(IColor(255, 0xB4, 0xBC, 0xCC), 1.f)}));
+
+    // Concave centre dish: dark at the top, light at the bottom
+    g.PathCircle(cx, cy, r * 0.62f);
+    g.PathFill(IPattern::CreateLinearGradient(cx, cy - r * 0.62f, cx, cy + r * 0.62f,
+      {IColorStop(IColor(255, 0xC4, 0xCC, 0xD9), 0.f), IColorStop(IColor(255, 0xF6, 0xF8, 0xFB), 1.f)}));
+    g.DrawCircle(IColor(70, 0x7A, 0x84, 0x99), cx, cy, r * 0.62f, nullptr, 1.f);
+  }
+
+  void DrawPointer(IGraphics& g, float angle, float cx, float cy, float radius) override
+  {
+    g.DrawRadialLine(IColor(255, 0x1B, 0x23, 0x40), cx, cy, angle,
+                     radius * 0.28f, radius * 0.58f, nullptr, 3.f);
+  }
+};
+
+class ReleaseKnobControl final : public SilverKnobControl
 {
 public:
   using CommitFunction = std::function<void(double)>;
@@ -352,7 +478,7 @@ public:
                      int paramIdx,
                      const IVStyle& style,
                      CommitFunction commitFunction)
-  : IVKnobControl(bounds, paramIdx, "RELEASE", style, false)
+  : SilverKnobControl(bounds, paramIdx, "RELEASE", style, false)
   , mCommitFunction(std::move(commitFunction))
   {
     SetTooltip("Riser Release");
@@ -481,8 +607,10 @@ RVRSE::RVRSE(const InstanceInfo& info)
     rvrse::kStutterDepthDefault / 100.0, 0., 1.0, 0.01, "");
   GetParam(kParamLush)->InitDouble("Lush",
     rvrse::kLushDefault, 0., 100.0, 0.1, "%");
+  // First 7 entries are beats (unchanged, so saved projects keep their value); the last 3
+  // are bars and follow the host time signature (e.g. "2 bars" in 3/4 = 6 beats).
   GetParam(kParamRiserLength)->InitEnum("Riser Length", rvrse::kRiserLengthDefault, {
-    "1/4", "1/2", "1", "2", "4", "8", "16"
+    "1/4", "1/2", "1", "2", "4", "8", "16", "1 bar", "2 bars", "4 bars"
   });
   GetParam(kParamFadeIn)->InitDouble("Fade In",
     rvrse::kFadeInDefault, 0., 100.0, 0.1, "%");
@@ -507,8 +635,44 @@ RVRSE::RVRSE(const InstanceInfo& info)
     rvrse::kRiserReleaseMinMs,
     rvrse::kRiserReleaseMaxMs,
     rvrse::kRiserReleaseStepMs,
-    "ms", IParam::kFlagCannotAutomate, "",
+    "ms", 0, "",
     IParam::ShapeLinear(), IParam::kUnitMilliseconds);
+  mLastRiserReleaseMs = rvrse::kRiserReleaseDefaultMs;
+
+  // --- Shape / character parameters (appended after v1.1.0) ---
+  GetParam(kParamReverbCharacter)->InitEnum("Reverb Character", rvrse::kReverbCharacterDefault, {
+    "Matrix", "Room", "Hall", "Plate"
+  });
+  GetParam(kParamTensionTarget)->InitEnum("Tension Target", rvrse::kTensionTargetDefault, {
+    "Off", "Volume", "Filter"
+  });
+  GetParam(kParamTensionRate)->InitEnum("Tension Rate", rvrse::kTensionRateDefault, {
+    rvrse::kTensionRateLabels[0], rvrse::kTensionRateLabels[1],
+    rvrse::kTensionRateLabels[2], rvrse::kTensionRateLabels[3]
+  });
+  GetParam(kParamTensionDepth)->InitDouble("Tension Depth",
+    rvrse::kTensionDepthDefault, 0., 100.0, 0.1, "%");
+  GetParam(kParamGateRegion)->InitEnum("Gate Region", rvrse::kGateRegionDefault, {
+    "Off", "Last beat", "Last 2 beats", "Last bar"
+  });
+  GetParam(kParamGateRate)->InitEnum("Gate Rate", rvrse::kGateRateDefault, {
+    rvrse::kGateRateLabels[0], rvrse::kGateRateLabels[1], rvrse::kGateRateLabels[2]
+  });
+  GetParam(kParamPostTail)->InitEnum("Post Tail", 0, { "Off", "On" });
+  GetParam(kParamLoudness)->InitEnum("Loudness", rvrse::kLoudnessModeDefault, {
+    "Off", "Auto", "Locked"
+  });
+  // Preset selector: applying one only changes other parameters (see ApplyPreset),
+  // so it is excluded from host automation.
+  GetParam(kParamPreset)->InitEnum("Preset", 0, rvrse::kNumPresetEntries, "",
+    IParam::kFlagCannotAutomate);
+  // Manual BPM override: 0 = follow the host tempo, otherwise 20–300 BPM.
+  GetParam(kParamManualBpm)->InitDouble("Manual BPM", 0.0, 0.0, rvrse::kManualBpmMax, 1.0, "BPM");
+  for (int presetIdx = 0; presetIdx < rvrse::kNumPresetEntries; ++presetIdx)
+  {
+    const std::string presetName = rvrse::GetPresetDisplayName(presetIdx);
+    GetParam(kParamPreset)->SetDisplayText(static_cast<double>(presetIdx), presetName.c_str());
+  }
 
 #if IPLUG_EDITOR
   mMakeGraphicsFunc = [&]() {
@@ -521,14 +685,15 @@ RVRSE::RVRSE(const InstanceInfo& info)
     const float w = b.W();
     const float h = b.H();
 
-    // ── Scale layout proportions relative to default 1024×620 ──────────
-    const float scaleY = h / 620.f;
+    // ── Scale layout proportions relative to the default window size ───
+    const float scaleY = h / static_cast<float>(PLUG_HEIGHT);
     const float gap      = kZoneGap;
     // Header and footer never shrink below their design size
     const float headerH  = std::max(kHeaderHeight, kHeaderHeight * scaleY);
     const float footerH  = std::max(kFooterHeight, kFooterHeight * scaleY);
     // Panels need a minimum height for their fixed-layout knobs/labels
-    constexpr float kMinPanelH = 246.f;
+    // (246 for the real-time + offline rows, plus the SHAPE section below them)
+    constexpr float kMinPanelH = 446.f;
     // At or above default size: waveform scales proportionally.
     // When shrinking: waveform absorbs squeeze to protect panels.
     const float fixedH   = headerH + footerH + gap * 4.f;
@@ -574,6 +739,48 @@ RVRSE::RVRSE(const InstanceInfo& info)
     const auto exportStatusBounds = [&](const IRECT& rect) {
       return rect.GetFromBottom(headerH * 0.36f).GetCentredInside(240.f, 14.f).GetHShifted(140.f).GetVShifted(-13.f);
     };
+
+    // ── SHAPE section geometry (below the OFFLINE row, inside the riser panel) ──
+    // Three rows of 48px: [Preset | Character | Loudness | Post tail],
+    // [Tension target | rate | depth], [Gate region | step].
+    struct ShapeLayout
+    {
+      IRECT label, preset, character, loudness, postTail;
+      IRECT tensionTarget, tensionRate, tensionDepth;
+      IRECT gateRegion, gateStep, manualBpm;
+    };
+    const ShapeLayout shapeLayout = [&]() {
+      constexpr float kShapeTop = 254.f;   // offset from the padded riser panel top
+      constexpr float kRowH = 48.f;
+      constexpr float kRowGap = 4.f;
+      constexpr float kSlicePad = 3.f;
+      const IRECT area = riserRect.GetPadded(-8.f).GetReducedFromTop(kShapeTop);
+      const auto row = [&](int idx) {
+        const float top = area.T + 22.f + static_cast<float>(idx) * (kRowH + kRowGap);
+        return IRECT(area.L, top, area.R, top + kRowH);
+      };
+      const auto slice = [&](const IRECT& r, float a, float c) {
+        return IRECT(r.L + r.W() * a + kSlicePad, r.T, r.L + r.W() * c - kSlicePad, r.B);
+      };
+
+      const IRECT rowA = row(0);
+      const IRECT rowB = row(1);
+      const IRECT rowC = row(2);
+
+      ShapeLayout l;
+      l.label         = IRECT(area.L, area.T, area.R, area.T + 18.f);
+      l.preset        = slice(rowA, 0.00f, 0.29f);
+      l.character     = slice(rowA, 0.29f, 0.62f);
+      l.loudness      = slice(rowA, 0.62f, 0.84f);
+      l.postTail      = slice(rowA, 0.84f, 1.00f);
+      l.tensionTarget = slice(rowB, 0.00f, 0.29f);
+      l.tensionRate   = slice(rowB, 0.29f, 0.62f);
+      l.tensionDepth  = slice(rowB, 0.62f, 1.00f);
+      l.gateRegion    = slice(rowC, 0.00f, 0.38f);
+      l.gateStep      = slice(rowC, 0.38f, 0.67f);
+      l.manualBpm     = slice(rowC, 0.67f, 1.00f);
+      return l;
+    }();
 
     // ── Resize path — reposition existing controls ─────────────────────
     if (pGraphics->NControls()) {
@@ -635,6 +842,18 @@ RVRSE::RVRSE(const InstanceInfo& info)
         offlineKnobRow.GetGridCell(3, 1, 5).GetCentredInside(60.f, 80.f));
       const IRECT stretchBounds = offlineKnobRow.GetGridCell(4, 1, 5).GetCentredInside(80.f, 50.f);
       pGraphics->GetControlWithTag(kCtrlTagStretchQuality)->SetTargetAndDrawRECTs(stretchBounds);
+      // Shape section
+      pGraphics->GetControlWithTag(kCtrlTagShapeSectionLabel)->SetTargetAndDrawRECTs(shapeLayout.label);
+      pGraphics->GetControlWithTag(kCtrlTagPreset)->SetTargetAndDrawRECTs(shapeLayout.preset);
+      pGraphics->GetControlWithTag(kCtrlTagCharacter)->SetTargetAndDrawRECTs(shapeLayout.character);
+      pGraphics->GetControlWithTag(kCtrlTagLoudness)->SetTargetAndDrawRECTs(shapeLayout.loudness);
+      pGraphics->GetControlWithTag(kCtrlTagPostTail)->SetTargetAndDrawRECTs(shapeLayout.postTail);
+      pGraphics->GetControlWithTag(kCtrlTagTensionTarget)->SetTargetAndDrawRECTs(shapeLayout.tensionTarget);
+      pGraphics->GetControlWithTag(kCtrlTagTensionRate)->SetTargetAndDrawRECTs(shapeLayout.tensionRate);
+      pGraphics->GetControlWithTag(kCtrlTagTensionDepth)->SetTargetAndDrawRECTs(shapeLayout.tensionDepth);
+      pGraphics->GetControlWithTag(kCtrlTagGateRegion)->SetTargetAndDrawRECTs(shapeLayout.gateRegion);
+      pGraphics->GetControlWithTag(kCtrlTagGateRate)->SetTargetAndDrawRECTs(shapeLayout.gateStep);
+      pGraphics->GetControlWithTag(kCtrlTagManualBpm)->SetTargetAndDrawRECTs(shapeLayout.manualBpm);
       // Hit panel
       const IRECT hitLabelBounds = hitRect.GetPadded(-8.f).GetFromTop(20.f);
       pGraphics->GetControlWithTag(kCtrlTagHitSectionLabel)->SetTargetAndDrawRECTs(hitLabelBounds);
@@ -656,6 +875,30 @@ RVRSE::RVRSE(const InstanceInfo& info)
     // ── First-time setup ───────────────────────────────────────────────
     pGraphics->SetLayoutOnResize(true);
     pGraphics->EnableTooltips(true);
+    // Arrow Up/Down step the parameter of the control under the mouse (Shift/Ctrl = fine).
+    pGraphics->EnableMouseOver(true);
+    pGraphics->SetKeyHandlerFunc([pGraphics](const IKeyPress& key, bool isUp) {
+      if (isUp || (key.VK != kVK_UP && key.VK != kVK_DOWN))
+        return false;
+
+      const int hoveredIdx = pGraphics->GetMouseOver();
+      IControl* hovered = hoveredIdx >= 0 ? pGraphics->GetControl(hoveredIdx) : nullptr;
+      if (!hovered)
+        return false;
+
+      // Containers (number box, menu) hover a child without a parameter: use the control
+      // that owns the parameter and contains the child.
+      IControl* target = hovered->GetParamIdx() >= 0 ? hovered : nullptr;
+      for (int i = 0; !target && i < pGraphics->NControls(); ++i)
+      {
+        IControl* candidate = pGraphics->GetControl(i);
+        if (candidate && candidate->GetParamIdx() >= 0 &&
+            candidate->GetRECT().Contains(hovered->GetRECT().MW(), hovered->GetRECT().MH()))
+          target = candidate;
+      }
+
+      return StepControlParam(target, key.VK == kVK_UP ? 1 : -1, key.S || key.C);
+    });
     pGraphics->AttachCornerResizer(EUIResizerMode::Size, true);
     pGraphics->LoadFont("Roboto-Regular", ROBOTO_FN);
     pGraphics->LoadFont("Roboto-Bold", ROBOTO_BOLD_FN);
@@ -776,22 +1019,22 @@ RVRSE::RVRSE(const InstanceInfo& info)
     pGraphics->GetControlWithTag(kCtrlTagExportButton)->SetDisabled(true);
 
     pGraphics->AttachControl(new ITextControl(exportStatusBounds(headerRect), "",
-      IText(14, kColorWhite, "Roboto-Regular", EAlign::Center, EVAlign::Middle)), kCtrlTagExportStatus);
+      IText(14, kColorOnDark, "Roboto-Regular", EAlign::Center, EVAlign::Middle)), kCtrlTagExportStatus);
 
     // Sample name: top-right area
     const IRECT sampleBounds = headerRect.GetPadded(-8.f).GetFromRight(300.f).GetFromTop(headerH * 0.6f);
     pGraphics->AttachControl(new ITextControl(sampleBounds, "No sample loaded",
-      IText(15, kColorTextPrimary, "Roboto-Regular", EAlign::Far, EVAlign::Middle)), kCtrlTagSampleName);
+      IText(15, kColorOnDark, "Roboto-Regular", EAlign::Far, EVAlign::Middle)), kCtrlTagSampleName);
 
     // BPM display: bottom-right area — updated from ProcessBlock when host tempo changes
     const IRECT bpmBounds = headerRect.GetPadded(-8.f).GetFromRight(300.f).GetFromBottom(headerH * 0.4f);
     pGraphics->AttachControl(new ITextControl(bpmBounds, "BPM: —",
-      IText(14, kColorTextSecondary, "Roboto-Regular", EAlign::Far, EVAlign::Middle)), kCtrlTagBPMDisplay);
+      IText(14, kColorOnDarkMuted, "Roboto-Regular", EAlign::Far, EVAlign::Middle)), kCtrlTagBPMDisplay);
 
     // Version string (footer — right)
     const IRECT versionBounds = footerRect.GetPadded(-8.f).GetFromRight(200.f);
     pGraphics->AttachControl(new ITextControl(versionBounds, "RVRSE v" PLUG_VERSION_STR,
-      IText(13, kColorTextPrimary, "Roboto-Regular", EAlign::Far)), kCtrlTagVersionNumber);
+      IText(13, kColorOnDark, "Roboto-Regular", EAlign::Far)), kCtrlTagVersionNumber);
 
     // ── Footer contents ─────────────────────────────────────────────────
     // Master Volume horizontal slider (left side of footer)
@@ -801,9 +1044,9 @@ RVRSE::RVRSE(const InstanceInfo& info)
     const IRECT masterSliderBounds = masterArea.GetReducedFromTop(20.f).GetCentredInside(200.f, 24.f);
 
     pGraphics->AttachControl(new ITextControl(masterLabelRow.GetFromLeft(110.f), "VOLUME",
-      IText(14, kColorTextPrimary, "Roboto-Regular", EAlign::Center, EVAlign::Middle)), kCtrlTagMasterVolLabel);
+      IText(14, kColorOnDark, "Roboto-Regular", EAlign::Center, EVAlign::Middle)), kCtrlTagMasterVolLabel);
     pGraphics->AttachControl(new ITextControl(masterLabelRow.GetFromRight(110.f), "100%",
-      IText(14, kColorTextSecondary, "Roboto-Regular", EAlign::Center, EVAlign::Middle)), kCtrlTagMasterVolValue);
+      IText(14, kColorOnDarkMuted, "Roboto-Regular", EAlign::Center, EVAlign::Middle)), kCtrlTagMasterVolValue);
 
     const IVStyle sliderStyle = DEFAULT_STYLE
       .WithColor(kFG, kColorGold)
@@ -867,11 +1110,11 @@ RVRSE::RVRSE(const InstanceInfo& info)
     const IRECT stutterDepthBounds = knobArea.GetGridCell(1, 1, 3).GetCentredInside(95.f, 110.f);
     const IRECT riserVolBounds = knobArea.GetGridCell(2, 1, 3).GetCentredInside(95.f, 110.f);
 
-    pGraphics->AttachControl(new IVKnobControl(stutterRateBounds, kParamStutterRate,
+    pGraphics->AttachControl(new SilverKnobControl(stutterRateBounds, kParamStutterRate,
       "RATE", knobStyle, true), kCtrlTagStutterRate);
-    pGraphics->AttachControl(new IVKnobControl(stutterDepthBounds, kParamStutterDepth,
+    pGraphics->AttachControl(new SilverKnobControl(stutterDepthBounds, kParamStutterDepth,
       "DEPTH", knobStyle, true), kCtrlTagStutterDepth);
-    pGraphics->AttachControl(new IVKnobControl(riserVolBounds, kParamRiserVolume,
+    pGraphics->AttachControl(new SilverKnobControl(riserVolBounds, kParamRiserVolume,
       "VOLUME", knobStyle, true), kCtrlTagRiserVolume);
 
     // ── Riser panel: offline section ────────────────────────────────────
@@ -899,11 +1142,11 @@ RVRSE::RVRSE(const InstanceInfo& info)
     const IRECT fadeInBounds  = offlineKnobRow.GetGridCell(2, 1, 5).GetCentredInside(60.f, 80.f);
     const IRECT releaseBounds = offlineKnobRow.GetGridCell(3, 1, 5).GetCentredInside(60.f, 80.f);
 
-    pGraphics->AttachControl(new IVKnobControl(lushBounds, kParamLush,
+    pGraphics->AttachControl(new SilverKnobControl(lushBounds, kParamLush,
       "LUSH", offlineKnobStyle, true), kCtrlTagLush);
-    pGraphics->AttachControl(new IVKnobControl(lengthBounds, kParamRiserLength,
+    pGraphics->AttachControl(new SilverKnobControl(lengthBounds, kParamRiserLength,
       "LENGTH", offlineKnobStyle, true), kCtrlTagRiserLength);
-    pGraphics->AttachControl(new IVKnobControl(fadeInBounds, kParamFadeIn,
+    pGraphics->AttachControl(new SilverKnobControl(fadeInBounds, kParamFadeIn,
       "FADE IN", offlineKnobStyle, true), kCtrlTagFadeIn);
     pGraphics->AttachControl(new ReleaseKnobControl(
       releaseBounds, kParamRiserReleaseMs, offlineKnobStyle,
@@ -928,8 +1171,59 @@ RVRSE::RVRSE(const InstanceInfo& info)
       .WithValueText(IText(12, kColorTextSecondary, "Roboto-Regular", EAlign::Center, EVAlign::Middle));
 
     const IRECT stretchBounds = offlineKnobRow.GetGridCell(4, 1, 5).GetCentredInside(80.f, 50.f);
-    pGraphics->AttachControl(new IVTabSwitchControl(stretchBounds, kParamStretchQuality,
+    pGraphics->AttachControl(new WheelTabControl(stretchBounds, kParamStretchQuality,
       {"HIGH", "LOW"}, "QUALITY", toggleStyle, EVShape::Rectangle, EDirection::Horizontal), kCtrlTagStretchQuality);
+
+    // ── Riser panel: SHAPE section (preset, character, tension LFO, gate) ──
+    pGraphics->AttachControl(new ITextControl(shapeLayout.label, "SHAPE",
+      IText(17, kColorSteel, "Roboto-Bold", EAlign::Near, EVAlign::Middle)), kCtrlTagShapeSectionLabel);
+
+    // Preset selector: popup list of the factory presets (changes parameters only).
+    const IVStyle presetStyle = toggleStyle
+      .WithShowValue(true)
+      .WithWidgetFrac(0.7f);
+    pGraphics->AttachControl(new WheelMenuControl(shapeLayout.preset, kParamPreset,
+      "PRESET", presetStyle), kCtrlTagPreset);
+
+    pGraphics->AttachControl(new WheelTabControl(shapeLayout.character, kParamReverbCharacter,
+      {"MATRIX", "ROOM", "HALL", "PLATE"}, "CHARACTER", toggleStyle,
+      EVShape::Rectangle, EDirection::Horizontal), kCtrlTagCharacter);
+    pGraphics->AttachControl(new WheelTabControl(shapeLayout.loudness, kParamLoudness,
+      {"OFF", "AUTO", "LOCK"}, "LOUDNESS", toggleStyle,
+      EVShape::Rectangle, EDirection::Horizontal), kCtrlTagLoudness);
+    pGraphics->AttachControl(new WheelTabControl(shapeLayout.postTail, kParamPostTail,
+      {"OFF", "ON"}, "POST TAIL", toggleStyle,
+      EVShape::Rectangle, EDirection::Horizontal), kCtrlTagPostTail);
+
+    pGraphics->AttachControl(new WheelTabControl(shapeLayout.tensionTarget, kParamTensionTarget,
+      {"OFF", "VOL", "FILTER"}, "TENSION", toggleStyle,
+      EVShape::Rectangle, EDirection::Horizontal), kCtrlTagTensionTarget);
+    pGraphics->AttachControl(new WheelTabControl(shapeLayout.tensionRate, kParamTensionRate,
+      {"1/4", "1/8", "1/16", "1/32"}, "TENSION RATE", toggleStyle,
+      EVShape::Rectangle, EDirection::Horizontal), kCtrlTagTensionRate);
+
+    const IVStyle depthSliderStyle = toggleStyle
+      .WithColor(kFG, kColorSteel)
+      .WithColor(kFR, kColorKnobTrack)
+      .WithColor(kX1, kColorSteel)
+      .WithDrawFrame(false)
+      .WithShowValue(true)
+      .WithWidgetFrac(1.f);
+    pGraphics->AttachControl(new IVSliderControl(shapeLayout.tensionDepth, kParamTensionDepth,
+      "TENSION DEPTH", depthSliderStyle, true, EDirection::Horizontal,
+      DEFAULT_GEARING, 8.f, 3.f), kCtrlTagTensionDepth);
+
+    pGraphics->AttachControl(new WheelTabControl(shapeLayout.gateRegion, kParamGateRegion,
+      {"OFF", "1 BEAT", "2 BEATS", "BAR"}, "LAST-BAR GATE", toggleStyle,
+      EVShape::Rectangle, EDirection::Horizontal), kCtrlTagGateRegion);
+    pGraphics->AttachControl(new WheelTabControl(shapeLayout.gateStep, kParamGateRate,
+      {"1/8", "1/16", "1/32"}, "GATE STEP", toggleStyle,
+      EVShape::Rectangle, EDirection::Horizontal), kCtrlTagGateRate);
+
+    // Manual BPM box: drag / wheel / double-click to type. 0 = follow host tempo.
+    pGraphics->AttachControl(new IVNumberBoxControl(shapeLayout.manualBpm, kParamManualBpm,
+      nullptr, "BPM (0 = HOST)", toggleStyle, false, 0., 0., rvrse::kManualBpmMax, "%0.0f"),
+      kCtrlTagManualBpm);
 
     // ── Hit panel contents ──────────────────────────────────────────────
     // Section label
@@ -948,7 +1242,7 @@ RVRSE::RVRSE(const InstanceInfo& info)
 
     const IRECT hitVolArea = hitRect.GetPadded(-8.f).GetReducedFromTop(28.f).GetFromTop(110.f);
     const IRECT hitVolBounds = hitVolArea.GetCentredInside(95.f, 110.f);
-    pGraphics->AttachControl(new IVKnobControl(hitVolBounds, kParamHitVolume,
+    pGraphics->AttachControl(new SilverKnobControl(hitVolBounds, kParamHitVolume,
       "VOLUME", hitKnobStyle, true), kCtrlTagHitVolume);
 
     // Hit waveform preview — between volume knob and bottom area
@@ -1004,6 +1298,7 @@ RVRSE::RVRSE(const InstanceInfo& info)
            kCtrlTagBPMDisplay,
            kCtrlTagRiserSectionLabel,
            kCtrlTagOfflineSectionLabel,
+           kCtrlTagShapeSectionLabel,
            kCtrlTagHitSectionLabel,
            kCtrlTagExportStatus,
            kCtrlTagMasterVolLabel,
@@ -1058,6 +1353,42 @@ void RVRSE::OnParamChange(int paramIdx, EParamSource source, int sampleOffset)
     QueueSequenceForCurrentTrim();
   else if (paramIdx == kParamRiserReleaseMs && source == EParamSource::kUI)
     mLegacyTransition.store(false, std::memory_order_release);
+  else if (paramIdx == kParamPreset && source == EParamSource::kUI)
+    ApplyPreset(static_cast<int>(GetParam(kParamPreset)->Value()));
+}
+
+void RVRSE::SetParamFromUI(int paramIdx, double value)
+{
+  IParam* param = GetParam(paramIdx);
+  if (!param)
+    return;
+
+  BeginInformHostOfParamChangeFromUI(paramIdx);
+  SendParameterValueFromUI(paramIdx, param->ToNormalized(value));
+  EndInformHostOfParamChangeFromUI(paramIdx);
+
+  // Refresh the control so it shows the new value (the preset menu itself is left alone).
+  if (GetUI())
+    SendParameterValueFromDelegate(paramIdx, param->GetNormalized(), true);
+}
+
+void RVRSE::ApplyPreset(int presetIdx)
+{
+  if (presetIdx < 0 || presetIdx >= rvrse::kNumPresetEntries)
+    return;
+
+  // Parameters only: the loaded sample, trim and hit settings are deliberately untouched.
+  const rvrse::Preset& p = rvrse::kPresets[presetIdx];
+  SetParamFromUI(kParamReverbCharacter, static_cast<double>(p.mCharacter));
+  SetParamFromUI(kParamLush, p.mLushPct);
+  SetParamFromUI(kParamRiserLength, static_cast<double>(p.mLengthIdx));
+  SetParamFromUI(kParamFadeIn, p.mFadeInPct);
+  SetParamFromUI(kParamTensionTarget, static_cast<double>(p.mTensionTarget));
+  SetParamFromUI(kParamTensionRate, static_cast<double>(p.mTensionRateIdx));
+  SetParamFromUI(kParamTensionDepth, p.mTensionDepthPct);
+  SetParamFromUI(kParamGateRegion, static_cast<double>(p.mGateRegion));
+  SetParamFromUI(kParamGateRate, static_cast<double>(p.mGateRateIdx));
+  SetParamFromUI(kParamPostTail, p.mPostTail ? 1.0 : 0.0);
 }
 
 void RVRSE::ClearLoadedSampleState()
@@ -1152,6 +1483,7 @@ void RVRSE::CommitRiserRelease(double releaseMs)
     kParamRiserReleaseMs,
     GetParam(kParamRiserReleaseMs)->ToNormalized(releaseMs)
   );
+  mLastRiserReleaseMs = releaseMs;
   mProcessor.setRiserRelease(
     releaseMs, rvrse::ETransitionMode::RiserRelease, GetRenderingOffline()
   );
@@ -1863,7 +2195,9 @@ void RVRSE::LoadSampleFromFile(const char* filePath, bool preserveTrim)
 
 // --- State persistence (save/restore with DAW project) ---
 
-static constexpr int kStateChunkVersion = 2;
+// v1: legacy (params up to Riser Release not stored), v2: transition mode + params up to
+// Riser Release, v3: adds reverb character, tension, gate, post tail, loudness, preset.
+static constexpr int kStateChunkVersion = 3;
 
 bool RVRSE::SerializeState(IByteChunk& chunk) const
 {
@@ -1899,7 +2233,7 @@ int RVRSE::UnserializeState(const IByteChunk& chunk, int startPos)
   const int serializedParamCount = version == 1
     ? std::min(static_cast<int>(kParamRiserReleaseMs),
                (chunk.Size() - startPos) / static_cast<int>(sizeof(double)))
-    : kNumParams;
+    : (version == 2 ? kNumParamsLegacyChunk : static_cast<int>(kNumParams));
 
   std::array<double, kNumParams> restoredValues {};
   for (int paramIdx = 0; paramIdx < serializedParamCount; ++paramIdx)
@@ -1917,6 +2251,7 @@ int RVRSE::UnserializeState(const IByteChunk& chunk, int startPos)
   OnParamReset(EParamSource::kPresetRecall);
   LEAVE_PARAMS_MUTEX
 
+  mLastRiserReleaseMs = GetParam(kParamRiserReleaseMs)->Value();
   const auto transitionMode = legacyTransition
     ? rvrse::ETransitionMode::LegacyAdaptive
     : rvrse::ETransitionMode::RiserRelease;
@@ -2017,8 +2352,12 @@ void RVRSE::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   float stutterDepth = static_cast<float>(GetParam(kParamStutterDepth)->Value());
   const float lush = static_cast<float>(GetParam(kParamLush)->Value() / 100.0);
   const int riserLengthIdx = static_cast<int>(GetParam(kParamRiserLength)->Value());
-  const double riserLengthBeats = rvrse::kRiserLengthValues[
-    std::clamp(riserLengthIdx, 0, rvrse::kNumRiserLengths - 1)];
+  // Bar-based lengths follow the host time signature (e.g. 3/4 → 3 beats per bar).
+  int timeSigNum = 4;
+  int timeSigDenom = 4;
+  GetTimeSig(timeSigNum, timeSigDenom);
+  const double beatsPerBar = rvrse::BeatsPerBarFromTimeSig(timeSigNum, timeSigDenom);
+  const double riserLengthBeats = rvrse::ResolveRiserLengthBeats(riserLengthIdx, beatsPerBar);
   const float fadeInPct = static_cast<float>(GetParam(kParamFadeIn)->Value() / 100.0);
   const float riserVolumeGain = std::pow(10.0f, static_cast<float>(GetParam(kParamRiserVolume)->Value()) / 20.0f);
   const float hitVolumeGain = std::pow(10.0f, static_cast<float>(GetParam(kParamHitVolume)->Value()) / 20.0f);
@@ -2034,7 +2373,7 @@ void RVRSE::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 
   // Read host BPM and propagate to the offline pipeline when it changes.
   // GetTempo() reads from the host-provided ITimeInfo (populated each block).
-  const double hostBPM = GetTempo();
+  const double hostBPM = rvrse::ResolveEffectiveBpm(GetParam(kParamManualBpm)->Value(), GetTempo());
   const bool offline = GetRenderingOffline();
   if (hostBPM > 0.0 && std::abs(hostBPM - mLastBPM) > 0.01)
   {
@@ -2055,6 +2394,49 @@ void RVRSE::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   {
     mLastRiserLength = riserLengthBeats;
     mProcessor.setRiserLength(riserLengthBeats, offline);
+  }
+
+  // Propagate Riser Release when it changed by host automation (UI gestures go through
+  // CommitRiserRelease, which also sets the processor directly). Idempotent in the processor.
+  const double riserReleaseMs = GetParam(kParamRiserReleaseMs)->Value();
+  if (std::abs(riserReleaseMs - mLastRiserReleaseMs) > 0.5)
+  {
+    mLastRiserReleaseMs = riserReleaseMs;
+    mLegacyTransition.store(false, std::memory_order_release);
+    mProcessor.setRiserRelease(riserReleaseMs, rvrse::ETransitionMode::RiserRelease, offline);
+  }
+
+  // Propagate reverb character (triggers reverb rebuild if changed)
+  const int reverbCharacter = std::clamp(
+    static_cast<int>(GetParam(kParamReverbCharacter)->Value()), 0, rvrse::kNumReverbCharacters - 1);
+  if (reverbCharacter != mLastReverbCharacter)
+  {
+    mLastReverbCharacter = reverbCharacter;
+    mProcessor.setReverbCharacter(static_cast<rvrse::EReverbCharacter>(reverbCharacter));
+  }
+
+  // Propagate shaping (tension LFO, last-bar gate, post tail, loudness). Only on change,
+  // so the processor's mutex is not touched every block.
+  {
+    rvrse::ShapeSettings shape;
+    shape.mTensionTarget = static_cast<rvrse::ETensionTarget>(
+      static_cast<int>(GetParam(kParamTensionTarget)->Value()));
+    shape.mTensionRateIdx = static_cast<int>(GetParam(kParamTensionRate)->Value());
+    shape.mTensionDepth = static_cast<float>(GetParam(kParamTensionDepth)->Value() / 100.0);
+    shape.mGateRegion = static_cast<rvrse::EGateRegion>(
+      static_cast<int>(GetParam(kParamGateRegion)->Value()));
+    shape.mGateRateIdx = static_cast<int>(GetParam(kParamGateRate)->Value());
+    shape.mPostTail = GetParam(kParamPostTail)->Value() >= 0.5;
+    shape.mLoudness = static_cast<rvrse::ELoudnessMode>(
+      static_cast<int>(GetParam(kParamLoudness)->Value()));
+    shape.mBeatsPerBar = beatsPerBar;
+
+    if (!mHasLastShape || !rvrse::SameShape(shape, mLastShape))
+    {
+      mHasLastShape = true;
+      mLastShape = shape;
+      mProcessor.setShape(shape, offline);
+    }
   }
 
   // Propagate Stretch Quality (triggers stretch rebuild if changed)

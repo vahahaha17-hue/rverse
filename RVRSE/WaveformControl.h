@@ -147,7 +147,7 @@ public:
     if (totalFrames == 0)
     {
       // Empty state — draw hint text
-      const IText emptyText(16, gui::kColorTextSecondary, "Roboto-Regular", EAlign::Center, EVAlign::Middle);
+      const IText emptyText(16, gui::kColorOnDarkMuted, "Roboto-Regular", EAlign::Center, EVAlign::Middle);
       g.DrawText(emptyText, "Load a sample or drop the sample file here to see the waveform", r);
       return;
     }
@@ -460,14 +460,14 @@ public:
     const float startX = FrameToX(trimRange.mStartFrame);
     const float endX = FrameToX(trimRange.mEndFrameExclusive);
 
-    // Dark background fill
-    g.FillRect(IColor(255, 0x0A, 0x10, 0x1A), r);
+    // Waveform background fill
+    g.FillRect(gui::kColorWaveformBg, r);
     // Subtle border
     g.DrawRect(gui::kColorSeparator, r, nullptr, 1.f);
 
     if (mPeaks.IsEmpty())
     {
-      const IText emptyText(11, gui::kColorTextMuted, "Roboto-Regular", EAlign::Center, EVAlign::Middle);
+      const IText emptyText(11, gui::kColorOnDarkMuted, "Roboto-Regular", EAlign::Center, EVAlign::Middle);
       g.DrawText(emptyText, "No sample", r);
       return;
     }

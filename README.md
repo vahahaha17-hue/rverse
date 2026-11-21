@@ -448,17 +448,25 @@ example WAV files are included only by the macOS installer.
 
 ### DAW Parameters
 
-Most parameters are exposed in the DAW's generic editor and can be automated. Riser Release is
-persisted but intentionally non-automatable; manual trim is edited on the lower waveform and is
-also persisted rather than automated.
+Almost all parameters are exposed in the DAW's generic editor and can be automated, including
+Riser Release and the SHAPE controls. Two things are intentionally not automatable: manual trim
+(edited on the lower waveform and persisted instead) and the Preset selector (a macro that sets
+the other, automatable parameters).
 
 | Parameter | Range | Default | Notes |
 |---|---|---|---|
 | Master Volume | 0–100% | 100% | Overall output level |
 | Lush | 0–100% | 40% | Reverb amount — linearly blends from 100/0 to 50/100 dry/wet and triggers offline rebuild |
-| Riser Length | 1/4, 1/2, 1, 2, 4, 8, 16 beats (discrete) | 4 | Time-stretch target — triggers offline rebuild |
+| Riser Length | 1/4, 1/2, 1, 2, 4, 8, 16 beats; 1, 2, 4 bars (follow host time signature) | 4 beats | Time-stretch target — triggers offline rebuild |
+| Reverb Character | Matrix / Room / Hall / Plate | Matrix | Matrix = original Airwindows reverb; others = FDN reverb |
+| Tension | Off / Volume / Filter; rate 1/4–1/32; depth 0–100% | Off | Tempo-synced LFO, fully open on the drop |
+| Last-bar Gate | Off / Last beat / Last 2 beats / Last bar; step 1/8, 1/16, 1/32 | Off | Rhythmic chop of the riser right before the drop |
+| Post Tail | Off / On | Off | Reverb tail continues after the hit |
+| Loudness | Off / Auto / Locked | Off | Auto normalises riser peak; Locked keeps the current gain |
+| Manual BPM | 0 (host) or 20–300 BPM | 0 | Overrides the host tempo for riser timing; type, drag or scroll. Wheel / Arrow Up-Down adjust any parameter under the cursor (Shift/Ctrl = fine) |
+| Preset | Init + 15 factory presets | Init | Changes parameters only, never the loaded sample |
 | Fade In | 0–100% | 60% | Linear ramp over portion of riser length |
-| Riser Release | 0–500 ms | 50 ms | Non-automatable post-anchor linear riser decay; commits on gesture end and rebuilds from the cached stretch stage |
+| Riser Release | 0–500 ms | 50 ms | Post-anchor linear riser decay; automatable (rebuilds from the cached stretch stage) |
 | Riser Volume | -60 to +6 dB | 0 dB | Independent riser voice gain |
 | Hit Volume | -60 to +6 dB | 0 dB | Independent hit voice gain |
 | Stutter Rate | 0–30 Hz | 0 (off) | Per-sample gate rate (also via MIDI CC1) |

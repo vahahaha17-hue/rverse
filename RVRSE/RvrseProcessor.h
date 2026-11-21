@@ -1,13 +1,14 @@
 #pragma once
 
 /// @file RvrseProcessor.h
-/// @brief Offline pipeline orchestrator: reverb → reverse → time-stretch.
+/// @brief Offline pipeline orchestrator: reverb → reverse → time-stretch → shape.
 ///        Runs on a background thread, never on the audio thread.
 ///        On parameter changes, rebuilds from the earliest changed stage onwards.
 
 #include "BufferUtils.h"
 #include "Constants.h"
 #include "ReverbEngineFactory.h"
+#include "RiserShaping.h"
 #include "SampleData.h"
 #include "TimeStretch.h"
 #include "TransitionTiming.h"
@@ -28,7 +29,7 @@ namespace rvrse {
 /// intermediate debug buffers for diagnostic playback (debug builds only).
 struct RiserData
 {
-  std::vector<float> mLeft;    ///< Left channel of final_riser[] (stretched + faded)
+  std::vector<float> mLeft;    ///< Left channel of final_riser[] (stretched, shaped, faded)
   std::vector<float> mRight;   ///< Right channel of final_riser[]
   double mSampleRate = 0.0;    ///< Sample rate of the riser data
   int mBeatAnchorFrames = 0;       ///< Frame count at the exact musical beat anchor
@@ -68,9 +69,15 @@ struct RiserData
 ///
 /// Usage:
 ///   1. Call `setSample()` when a new hit sample is loaded.
-///   2. Call `setLush()` / `setRiserLength()` / `setBPM()` when parameters change.
+///   2. Call `setLush()` / `setReverbCharacter()` / `setRiserLength()` / `setBPM()` /
+///      `setShape()` when parameters change.
 ///   3. Each setter triggers an async rebuild from the appropriate pipeline stage.
 ///   4. Poll `isNewRiserReady()` from the audio thread; if true, call `consumeRiser()`.
+///
+/// Stages and what invalidates them:
+///   Reverb  (sample, trim, Lush, character, sample rate)  → reverb → reverse (cached)
+///   Stretch (length, BPM, quality, release)               → stretch + fades  (cached "base")
+///   Shape   (tension, gate, post tail, loudness, bar len) → LFO → gate → tail → loudness
 ///
 /// Thread safety:
 ///   - Setters may be called from any thread (UI, main, etc.)
@@ -83,7 +90,7 @@ public:
 
   // --- Setters (trigger async rebuild) ---
 
-  /// Set the source hit sample. Triggers a full pipeline rebuild (reverb → reverse → stretch).
+  /// Set the source hit sample. Triggers a full pipeline rebuild (reverb → reverse → stretch → shape).
   int setSample(std::shared_ptr<SampleData> sample,
                 double trimStartMs = 0.0,
                 double trimEndMs = 0.0)
@@ -95,13 +102,7 @@ public:
       mTrimStartMs = trimStartMs;
       mTrimEndMs = trimEndMs;
       sequenceId = ++mSequenceId;
-      // Clear cached intermediate buffers since the source changed
-      mCachedReversedL.clear();
-      mCachedReversedR.clear();
-#ifndef NDEBUG
-      mCachedReverbedL.clear();
-      mCachedReverbedR.clear();
-#endif
+      clearReverbCachesLocked();
     }
     rebuildAsync(EPipelineStage::Reverb);
     return sequenceId;
@@ -114,13 +115,19 @@ public:
       std::lock_guard<std::mutex> lock(mParamMutex);
       if (std::abs(mLush - lush) < 1e-6f) return; // No change
       mLush = lush;
-      // Clear cached reversed buffer since reverb output changed
-      mCachedReversedL.clear();
-      mCachedReversedR.clear();
-#ifndef NDEBUG
-      mCachedReverbedL.clear();
-      mCachedReverbedR.clear();
-#endif
+      clearReverbCachesLocked();
+    }
+    rebuildAsync(EPipelineStage::Reverb);
+  }
+
+  /// Set the reverb character (Matrix / Room / Hall / Plate). Triggers a reverb-stage rebuild.
+  void setReverbCharacter(EReverbCharacter character)
+  {
+    {
+      std::lock_guard<std::mutex> lock(mParamMutex);
+      if (mReverbCharacter == character) return;
+      mReverbCharacter = character;
+      clearReverbCachesLocked();
     }
     rebuildAsync(EPipelineStage::Reverb);
   }
@@ -141,12 +148,7 @@ public:
       mTrimStartMs = trimStartMs;
       mTrimEndMs = trimEndMs;
       sequenceId = ++mSequenceId;
-      mCachedReversedL.clear();
-      mCachedReversedR.clear();
-#ifndef NDEBUG
-      mCachedReverbedL.clear();
-      mCachedReverbedR.clear();
-#endif
+      clearReverbCachesLocked();
     }
     rebuildAsync(EPipelineStage::Reverb);
     return sequenceId;
@@ -162,10 +164,7 @@ public:
       if (std::abs(mRiserLengthBeats - beats) < 1e-9) return;
       mRiserLengthBeats = beats;
     }
-    if (offline)
-      rebuildStretchSync();
-    else
-      rebuildAsync(EPipelineStage::Stretch);
+    rebuild(EPipelineStage::Stretch, offline);
   }
 
   /// Set the host BPM. Only re-stretches.
@@ -177,10 +176,7 @@ public:
       if (std::abs(mBPM - bpm) < 1e-9) return;
       mBPM = bpm;
     }
-    if (offline)
-      rebuildStretchSync();
-    else
-      rebuildAsync(EPipelineStage::Stretch);
+    rebuild(EPipelineStage::Stretch, offline);
   }
 
   /// Set the output sample rate. Triggers full rebuild if changed.
@@ -190,12 +186,7 @@ public:
       std::lock_guard<std::mutex> lock(mParamMutex);
       if (std::abs(mOutputSampleRate - sr) < 1e-9) return;
       mOutputSampleRate = sr;
-      mCachedReversedL.clear();
-      mCachedReversedR.clear();
-#ifndef NDEBUG
-      mCachedReverbedL.clear();
-      mCachedReverbedR.clear();
-#endif
+      clearReverbCachesLocked();
     }
     rebuildAsync(EPipelineStage::Reverb);
   }
@@ -208,10 +199,7 @@ public:
       if (mStretchQuality == quality) return;
       mStretchQuality = quality;
     }
-    if (offline)
-      rebuildStretchSync();
-    else
-      rebuildAsync(EPipelineStage::Stretch);
+    rebuild(EPipelineStage::Stretch, offline);
   }
 
   /// Set the requested post-anchor riser release and transition mode.
@@ -228,10 +216,31 @@ public:
       mRiserReleaseMs = releaseMs;
       mTransitionMode = mode;
     }
-    if (offline)
-      rebuildStretchSync();
-    else
-      rebuildAsync(EPipelineStage::Stretch);
+    rebuild(EPipelineStage::Stretch, offline);
+  }
+
+  /// Set the shaping settings (Tension LFO, gate, post tail, loudness, bar length).
+  /// Rebuilds only the cheap shape stage from the cached stretched riser.
+  void setShape(const ShapeSettings& shape, bool offline = false)
+  {
+    {
+      std::lock_guard<std::mutex> lock(mParamMutex);
+      if (sameShape(mShape, shape)) return;
+
+      // Leaving Auto/Locked forgets the remembered gain so a later lock starts fresh.
+      if (shape.mLoudness == kLoudnessOff)
+      {
+        mHasAutoGain = false;
+        mLockedGainValid = false;
+      }
+      else if (shape.mLoudness == kLoudnessAuto)
+      {
+        mLockedGainValid = false;
+      }
+
+      mShape = shape;
+    }
+    rebuild(EPipelineStage::Shape, offline);
   }
 
   // --- Audio-thread-safe polling ---
@@ -262,6 +271,8 @@ public:
   }
 
 #ifdef RVRSE_TEST_BUILD
+  /// Runs the reverb → reverse → stretch → shape pipeline synchronously with the
+  /// processor's current settings (set them first via the normal setters).
   std::shared_ptr<RiserData> RunReverbPipelineForTests(std::shared_ptr<SampleData> sample,
                                                        double outputSampleRate,
                                                        float lush,
@@ -275,16 +286,54 @@ public:
       mSequenceId = sequenceId;
       mTrimStartMs = 0.0;
       mTrimEndMs = 0.0;
-      mCachedReversedL.clear();
-      mCachedReversedR.clear();
-#ifndef NDEBUG
-      mCachedReverbedL.clear();
-      mCachedReverbedR.clear();
-#endif
+      clearReverbCachesLocked();
     }
 
     const int generation = mGeneration.fetch_add(1, std::memory_order_release) + 1;
     runPipeline(EPipelineStage::Reverb, generation);
+    return peekRiser();
+  }
+
+  /// Test hook: configure everything and run synchronously, no background threads.
+  std::shared_ptr<RiserData> RunFullPipelineForTests(std::shared_ptr<SampleData> sample,
+                                                     double outputSampleRate,
+                                                     float lush,
+                                                     EReverbCharacter character,
+                                                     double bpm,
+                                                     double riserLengthBeats,
+                                                     const ShapeSettings& shape,
+                                                     int sequenceId = 1)
+  {
+    {
+      std::lock_guard<std::mutex> lock(mParamMutex);
+      mSourceSample = std::move(sample);
+      mOutputSampleRate = outputSampleRate;
+      mLush = lush;
+      mReverbCharacter = character;
+      mBPM = bpm;
+      mRiserLengthBeats = riserLengthBeats;
+      mShape = shape;
+      mSequenceId = sequenceId;
+      mTrimStartMs = 0.0;
+      mTrimEndMs = 0.0;
+      clearReverbCachesLocked();
+    }
+
+    const int generation = mGeneration.fetch_add(1, std::memory_order_release) + 1;
+    runPipeline(EPipelineStage::Reverb, generation);
+    return peekRiser();
+  }
+
+  /// Test hook: re-run only the shape stage synchronously after changing settings.
+  std::shared_ptr<RiserData> ReshapeForTests(const ShapeSettings& shape)
+  {
+    {
+      std::lock_guard<std::mutex> lock(mParamMutex);
+      mShape = shape;
+    }
+
+    const int generation = mGeneration.fetch_add(1, std::memory_order_release) + 1;
+    runPipeline(EPipelineStage::Shape, generation);
     return peekRiser();
   }
 #endif
@@ -293,9 +342,39 @@ private:
   /// Pipeline stages — rebuild starts from the specified stage onwards.
   enum class EPipelineStage
   {
-    Reverb = 0, ///< Full rebuild: reverb → reverse → stretch
-    Stretch     ///< Partial rebuild: time-stretch only (uses cached reversed buffer)
+    Reverb = 0, ///< Full rebuild: reverb → reverse → stretch → shape
+    Stretch,    ///< Partial rebuild: time-stretch + shape (uses cached reversed buffer)
+    Shape       ///< Partial rebuild: shape only (uses cached stretched base riser)
   };
+
+  static bool sameShape(const ShapeSettings& a, const ShapeSettings& b)
+  {
+    return SameShape(a, b);
+  }
+
+  /// Drop everything derived from the reverb stage. Caller holds mParamMutex.
+  void clearReverbCachesLocked()
+  {
+    mCachedReversedL.clear();
+    mCachedReversedR.clear();
+    mCachedTailL.clear();
+    mCachedTailR.clear();
+    mCachedBase.reset();
+#ifndef NDEBUG
+    mCachedReverbedL.clear();
+    mCachedReverbedR.clear();
+#endif
+  }
+
+  /// Offline renders rebuild synchronously (so bounce/export picks the change up
+  /// immediately); real-time mode uses a background thread to never block audio.
+  void rebuild(EPipelineStage stage, bool offline)
+  {
+    if (offline)
+      rebuildSync(stage);
+    else
+      rebuildAsync(stage);
+  }
 
   /// Launch a background thread to run the pipeline from the given stage.
   void rebuildAsync(EPipelineStage fromStage)
@@ -307,95 +386,110 @@ private:
     }).detach();
   }
 
-  /// Perform a stretch-only rebuild synchronously on the calling thread.
-  /// Falls back to async if cached reversed buffers aren't available yet
+  /// Perform a partial rebuild synchronously on the calling thread.
+  /// Falls back to async if the needed caches aren't available yet
   /// (i.e. the initial reverb+reverse pass hasn't completed).
   ///
   /// Only called during offline/bounce rendering where real-time deadlines
   /// don't apply. Never call this during real-time playback.
-  void rebuildStretchSync()
+  void rebuildSync(EPipelineStage stage)
   {
     // Invalidate in-flight builds and capture our generation token
     const int myGen = mGeneration.fetch_add(1, std::memory_order_release) + 1;
 
-    // Snapshot parameters under lock
-    std::shared_ptr<SampleData> sample;
-    double riserLengthBeats, bpm, sampleRate, riserReleaseMs;
-    EStretchQuality quality;
-    ETransitionMode transitionMode;
-    int sequenceId;
-    std::vector<float> cachedRevL, cachedRevR;
-#ifndef NDEBUG
-    std::vector<float> cachedRvbL, cachedRvbR;
-#endif
-
+    bool haveCaches = false;
     {
       std::lock_guard<std::mutex> lock(mParamMutex);
-      sample = mSourceSample;
-      riserLengthBeats = mRiserLengthBeats;
-      bpm = mBPM;
-      sampleRate = mOutputSampleRate;
-      riserReleaseMs = mRiserReleaseMs;
-      quality = mStretchQuality;
-      transitionMode = mTransitionMode;
-      sequenceId = mSequenceId;
-      cachedRevL = mCachedReversedL;
-      cachedRevR = mCachedReversedR;
-#ifndef NDEBUG
-      cachedRvbL = mCachedReverbedL;
-      cachedRvbR = mCachedReverbedR;
-#endif
+      const bool haveSample = mSourceSample && mSourceSample->IsLoaded();
+      haveCaches = haveSample &&
+                   (stage == EPipelineStage::Shape ? static_cast<bool>(mCachedBase)
+                                                   : !mCachedReversedL.empty());
     }
 
     // No cached buffers yet — fall back to async (first load still in progress)
-    if (cachedRevL.empty() || !sample || !sample->IsLoaded())
+    if (!haveCaches)
     {
-      rebuildAsync(EPipelineStage::Stretch);
+      rebuildAsync(stage);
       return;
     }
 
-    const TransitionTiming transitionTiming = CalculateTransitionTiming(
-      static_cast<int>(cachedRevL.size()), riserLengthBeats, bpm, sampleRate,
-      riserReleaseMs, transitionMode
-    );
+    runPipeline(stage, myGen);
+  }
 
-    auto riser = std::make_shared<RiserData>();
-    stretchBufferStereo(cachedRevL, cachedRevR, transitionTiming.mStretchFactor,
-                        riser->mLeft, riser->mRight, sampleRate, quality);
-    riser->mSampleRate = sampleRate;
-    riser->mSequenceId = sequenceId;
-    riser->mBeatAnchorFrames = transitionTiming.mBeatAnchorFrames;
-    riser->mHitPreBeatFrames = transitionTiming.mHitPreBeatFrames;
-    riser->mRequestedReleaseFrames = transitionTiming.mRequestedReleaseFrames;
-    riser->mEffectiveReleaseFrames = transitionTiming.mEffectiveReleaseFrames;
-    riser->mTransitionMode = transitionTiming.mMode;
-
-#ifndef NDEBUG
-    riser->mReverbedL = std::move(cachedRvbL);
-    riser->mReverbedR = std::move(cachedRvbR);
-    riser->mReversedL = std::move(cachedRevL);
-    riser->mReversedR = std::move(cachedRevR);
-#endif
-
-    if (transitionTiming.mMode == ETransitionMode::LegacyAdaptive &&
-        transitionTiming.mTailFadeFrames > 0)
+  /// Forward wet-only reverb signal (reverb output minus the dry component), used
+  /// for the optional post tail.
+  static void extractWetTail(const std::vector<float>& reverbedL, const std::vector<float>& reverbedR,
+                             const std::vector<float>& dryL, const std::vector<float>& dryR,
+                             float dryGain,
+                             std::vector<float>& tailL, std::vector<float>& tailR)
+  {
+    const size_t n = reverbedL.size();
+    tailL.resize(n);
+    tailR.resize(n);
+    for (size_t i = 0; i < n; ++i)
     {
-      applyTailFadeOutStereo(riser->mLeft, riser->mRight, transitionTiming.mTailFadeFrames);
+      const float dl = i < dryL.size() ? dryL[i] : 0.0f;
+      const float dr = i < dryR.size() ? dryR[i] : 0.0f;
+      tailL[i] = reverbedL[i] - dl * dryGain;
+      tailR[i] = reverbedR[i] - dr * dryGain;
     }
-    else if (transitionTiming.mEffectiveReleaseFrames > 0)
+  }
+
+  /// Resolve the loudness gain for the current mode and peak, updating the lock state.
+  float resolveLoudnessGain(ELoudnessMode mode, float peak)
+  {
+    std::lock_guard<std::mutex> lock(mParamMutex);
+    switch (mode)
     {
-      applyLinearFadeOutRangeStereo(
-        riser->mLeft, riser->mRight,
-        transitionTiming.mBeatAnchorFrames, transitionTiming.RiserEndFrame()
-      );
+      case kLoudnessAuto:
+      {
+        const float gain = ComputeLoudnessGain(peak);
+        mLastAutoGain = gain;
+        mHasAutoGain = true;
+        mLockedGainValid = false;
+        return gain;
+      }
+      case kLoudnessLocked:
+      {
+        if (!mLockedGainValid)
+        {
+          mLockedGain = mHasAutoGain ? mLastAutoGain : ComputeLoudnessGain(peak);
+          mLockedGainValid = true;
+        }
+        return mLockedGain;
+      }
+      case kLoudnessOff:
+      default:
+        return 1.0f;
     }
+  }
 
-    // Only publish if no newer rebuild has been requested
-    if (mGeneration.load(std::memory_order_acquire) != myGen) return;
+  /// Shape stage: copy the base riser, then LFO → gate → post tail → loudness.
+  std::shared_ptr<RiserData> buildShaped(const RiserData& base,
+                                         const ShapeSettings& shape,
+                                         double bpm,
+                                         const std::vector<float>& tailL,
+                                         const std::vector<float>& tailR)
+  {
+    auto riser = std::make_shared<RiserData>(base);
 
-    std::atomic_store(&mRiserOutput, riser);
-    mNewRiserReady.store(true, std::memory_order_release);
-    completeIfCurrent(myGen);
+    ApplyTensionLfo(riser->mLeft, riser->mRight, riser->mBeatAnchorFrames, bpm,
+                    riser->mSampleRate, shape.mTensionTarget, shape.mTensionRateIdx,
+                    shape.mTensionDepth);
+
+    ApplyLastBarGate(riser->mLeft, riser->mRight, riser->mBeatAnchorFrames, bpm,
+                     riser->mSampleRate, shape.mGateRegion, shape.mGateRateIdx,
+                     shape.mBeatsPerBar);
+
+    if (shape.mPostTail)
+      MixPostTail(riser->mLeft, riser->mRight, tailL, tailR,
+                  riser->HitStartFrame(), riser->mSampleRate);
+
+    const float gain = resolveLoudnessGain(shape.mLoudness,
+                                           ComputePeak(riser->mLeft, riser->mRight));
+    ApplyGain(riser->mLeft, riser->mRight, gain);
+
+    return riser;
   }
 
   /// Execute the pipeline synchronously (called on background thread).
@@ -404,11 +498,14 @@ private:
     // Snapshot parameters under lock
     std::shared_ptr<SampleData> sample;
     float lush;
+    EReverbCharacter character;
     double riserLengthBeats, bpm, sampleRate, trimStartMs, trimEndMs, riserReleaseMs;
     EStretchQuality quality;
     ETransitionMode transitionMode;
+    ShapeSettings shape;
     int sequenceId;
-    std::vector<float> cachedRevL, cachedRevR;
+    std::vector<float> cachedRevL, cachedRevR, cachedTailL, cachedTailR;
+    std::shared_ptr<const RiserData> cachedBase;
 #ifndef NDEBUG
     std::vector<float> cachedRvbL, cachedRvbR;
 #endif
@@ -417,6 +514,7 @@ private:
       std::lock_guard<std::mutex> lock(mParamMutex);
       sample = mSourceSample;
       lush = mLush;
+      character = mReverbCharacter;
       riserLengthBeats = mRiserLengthBeats;
       bpm = mBPM;
       sampleRate = mOutputSampleRate;
@@ -425,17 +523,22 @@ private:
       riserReleaseMs = mRiserReleaseMs;
       quality = mStretchQuality;
       transitionMode = mTransitionMode;
+      shape = mShape;
       sequenceId = mSequenceId;
 
-      if (fromStage == EPipelineStage::Stretch)
+      if (fromStage != EPipelineStage::Reverb)
       {
         cachedRevL = mCachedReversedL;
         cachedRevR = mCachedReversedR;
+        cachedTailL = mCachedTailL;
+        cachedTailR = mCachedTailR;
 #ifndef NDEBUG
         cachedRvbL = mCachedReverbedL;
         cachedRvbR = mCachedReverbedR;
 #endif
       }
+      if (fromStage == EPipelineStage::Shape)
+        cachedBase = mCachedBase;
     }
 
     // Bail early if no sample loaded
@@ -449,7 +552,15 @@ private:
     if (mGeneration.load(std::memory_order_acquire) != generation)
       return;
 
-    std::vector<float> reversedL, reversedR;
+    // --- Shape-only rebuild: reuse the cached stretched base riser ---
+    if (fromStage == EPipelineStage::Shape && cachedBase && cachedBase->IsReady())
+    {
+      auto shaped = buildShaped(*cachedBase, shape, bpm, cachedTailL, cachedTailR);
+      publish(shaped, generation);
+      return;
+    }
+
+    std::vector<float> reversedL, reversedR, tailL, tailR;
 #ifndef NDEBUG
     std::vector<float> reverbedL, reverbedR;
 #endif
@@ -489,9 +600,9 @@ private:
 
       // --- Stage 1: Reverb (with tail extension) ---
       // The reverb needs room to ring out. We append silence to the source
-      // buffer so the comb/allpass delay lines can decay naturally. Without
-      // this, the reverb tail is truncated and the reversed riser has no
-      // "whoosh" build-up — defeating the entire purpose of the effect.
+      // buffer so the delay lines can decay naturally. Without this, the reverb
+      // tail is truncated and the reversed riser has no "whoosh" build-up —
+      // defeating the entire purpose of the effect.
       const size_t srcFrames = srcL.size();
       const size_t tailFrames = static_cast<size_t>(processingRate * kReverbTailSeconds);
       const size_t totalFrames = srcFrames + tailFrames;
@@ -503,9 +614,11 @@ private:
       std::vector<float> lushedL(totalFrames);
       std::vector<float> lushedR(totalFrames);
 
-      const ReverbSettings reverbSettings { lush };
+      ReverbSettings reverbSettings;
+      reverbSettings.mLush = lush;
+      reverbSettings.mCharacter = character;
 
-      auto reverbEngine = MakeActiveReverbEngine();
+      auto reverbEngine = MakeReverbEngine(character);
       if (!reverbEngine)
       {
         completeIfCurrent(generation);
@@ -536,6 +649,9 @@ private:
       if (mGeneration.load(std::memory_order_acquire) != generation)
         return;
 
+      // Forward wet-only tail for the optional post tail (before the buffers are reversed).
+      extractWetTail(lushedL, lushedR, srcL, srcR, GetReverbDryGain(lush), tailL, tailR);
+
       // --- Stage 2: Reverse ---
 #ifndef NDEBUG
       // Save pre-reverse (reverbed) buffers for debug playback
@@ -547,7 +663,7 @@ private:
       reversedL = std::move(lushedL);
       reversedR = std::move(lushedR);
 
-      // Cache the reversed + reverbed buffers for future stretch-only rebuilds
+      // Cache the reversed buffers and forward tail for future partial rebuilds
       {
         std::lock_guard<std::mutex> lock(mParamMutex);
         if (mGeneration.load(std::memory_order_acquire) != generation)
@@ -555,6 +671,8 @@ private:
 
         mCachedReversedL = reversedL;
         mCachedReversedR = reversedR;
+        mCachedTailL = tailL;
+        mCachedTailR = tailR;
 #ifndef NDEBUG
         mCachedReverbedL = reverbedL;
         mCachedReverbedR = reverbedR;
@@ -563,9 +681,11 @@ private:
     }
     else
     {
-      // Use cached buffers (stretch-only rebuild)
+      // Use cached buffers (stretch/shape rebuild)
       reversedL = std::move(cachedRevL);
       reversedR = std::move(cachedRevR);
+      tailL = std::move(cachedTailL);
+      tailR = std::move(cachedTailR);
 #ifndef NDEBUG
       reverbedL = std::move(cachedRvbL);
       reverbedR = std::move(cachedRvbR);
@@ -576,55 +696,72 @@ private:
     if (mGeneration.load(std::memory_order_acquire) != generation)
       return;
 
+    // --- Stage 3: Stretch + fades → base riser ---
     const TransitionTiming transitionTiming = CalculateTransitionTiming(
       static_cast<int>(reversedL.size()), riserLengthBeats, bpm, sampleRate,
       riserReleaseMs, transitionMode
     );
 
-    auto riser = std::make_shared<RiserData>();
+    auto base = std::make_shared<RiserData>();
     stretchBufferStereo(reversedL, reversedR, transitionTiming.mStretchFactor,
-                        riser->mLeft, riser->mRight, sampleRate, quality);
+                        base->mLeft, base->mRight, sampleRate, quality);
 
     const int headFadeFrames = std::max(0, static_cast<int>(
       std::lround(sampleRate * kTechnicalHeadFadeInMs / 1000.0)
     ));
     if (headFadeFrames > 0)
-      applyHeadFadeInStereo(riser->mLeft, riser->mRight, headFadeFrames);
+      applyHeadFadeInStereo(base->mLeft, base->mRight, headFadeFrames);
 
-    riser->mSampleRate = sampleRate;
-    riser->mSequenceId = sequenceId;
-    riser->mBeatAnchorFrames = transitionTiming.mBeatAnchorFrames;
-    riser->mHitPreBeatFrames = transitionTiming.mHitPreBeatFrames;
-    riser->mRequestedReleaseFrames = transitionTiming.mRequestedReleaseFrames;
-    riser->mEffectiveReleaseFrames = transitionTiming.mEffectiveReleaseFrames;
-    riser->mTransitionMode = transitionTiming.mMode;
+    base->mSampleRate = sampleRate;
+    base->mSequenceId = sequenceId;
+    base->mBeatAnchorFrames = transitionTiming.mBeatAnchorFrames;
+    base->mHitPreBeatFrames = transitionTiming.mHitPreBeatFrames;
+    base->mRequestedReleaseFrames = transitionTiming.mRequestedReleaseFrames;
+    base->mEffectiveReleaseFrames = transitionTiming.mEffectiveReleaseFrames;
+    base->mTransitionMode = transitionTiming.mMode;
 
 #ifndef NDEBUG
     // Store intermediate buffers for debug playback
-    riser->mReverbedL = std::move(reverbedL);
-    riser->mReverbedR = std::move(reverbedR);
-    riser->mReversedL = std::move(reversedL);
-    riser->mReversedR = std::move(reversedR);
+    base->mReverbedL = std::move(reverbedL);
+    base->mReverbedR = std::move(reverbedR);
+    base->mReversedL = std::move(reversedL);
+    base->mReversedR = std::move(reversedR);
 #endif
 
     if (transitionTiming.mMode == ETransitionMode::LegacyAdaptive &&
         transitionTiming.mTailFadeFrames > 0)
     {
-      applyTailFadeOutStereo(riser->mLeft, riser->mRight, transitionTiming.mTailFadeFrames);
+      applyTailFadeOutStereo(base->mLeft, base->mRight, transitionTiming.mTailFadeFrames);
     }
     else if (transitionTiming.mEffectiveReleaseFrames > 0)
     {
       applyLinearFadeOutRangeStereo(
-        riser->mLeft, riser->mRight,
+        base->mLeft, base->mRight,
         transitionTiming.mBeatAnchorFrames, transitionTiming.RiserEndFrame()
       );
     }
 
+    // Abort check, then keep the base so shape-only changes skip the stretch.
+    {
+      std::lock_guard<std::mutex> lock(mParamMutex);
+      if (mGeneration.load(std::memory_order_acquire) != generation)
+        return;
+      mCachedBase = base;
+    }
+
+    // --- Stage 4: Shape (Tension LFO → gate → post tail → loudness) ---
+    auto shaped = buildShaped(*base, shape, bpm, tailL, tailR);
+    publish(shaped, generation);
+  }
+
+  /// Publish a finished riser if no newer rebuild has been requested.
+  void publish(const std::shared_ptr<RiserData>& riser, int generation)
+  {
     // Final abort check before publishing
     if (mGeneration.load(std::memory_order_acquire) != generation)
       return;
 
-    // Publish the result (atomic store for lock-free audio-thread read)
+    // Atomic store for lock-free audio-thread read
     std::atomic_store(&mRiserOutput, riser);
     mNewRiserReady.store(true, std::memory_order_release);
     completeIfCurrent(generation);
@@ -640,6 +777,7 @@ private:
   std::mutex mParamMutex;
   std::shared_ptr<SampleData> mSourceSample;
   float mLush = static_cast<float>(kLushDefault / 100.0);
+  EReverbCharacter mReverbCharacter = static_cast<EReverbCharacter>(kReverbCharacterDefault);
   double mRiserLengthBeats = kRiserLengthValues[kRiserLengthDefault];
   double mBPM = kDefaultBPM;
   double mOutputSampleRate = 44100.0;
@@ -648,11 +786,21 @@ private:
   double mRiserReleaseMs = kRiserReleaseDefaultMs;
   ETransitionMode mTransitionMode = ETransitionMode::RiserRelease;
   EStretchQuality mStretchQuality = static_cast<EStretchQuality>(kStretchQualityDefault);
+  ShapeSettings mShape;
   int mSequenceId = 0;
+
+  // --- Loudness lock state (protected by mParamMutex) ---
+  float mLastAutoGain = 1.0f;     ///< Gain most recently computed in Auto mode
+  bool mHasAutoGain = false;      ///< Whether mLastAutoGain is valid
+  float mLockedGain = 1.0f;       ///< Gain held while in Locked mode
+  bool mLockedGainValid = false;  ///< Whether mLockedGain has been captured
 
   // --- Cached intermediate buffers (protected by mParamMutex) ---
   std::vector<float> mCachedReversedL;
   std::vector<float> mCachedReversedR;
+  std::vector<float> mCachedTailL;  ///< Forward wet-only reverb tail (for Post tail)
+  std::vector<float> mCachedTailR;
+  std::shared_ptr<const RiserData> mCachedBase; ///< Stretched + faded riser before shaping
 #ifndef NDEBUG
   std::vector<float> mCachedReverbedL;
   std::vector<float> mCachedReverbedR;

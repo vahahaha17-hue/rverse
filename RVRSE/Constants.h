@@ -44,6 +44,32 @@ constexpr const char* kRiserLengthLabels[kNumRiserLengths] = {
   "1/4", "1/2", "1", "2", "4", "8", "16"
 };
 
+// --- Riser Length in bars (follows the host time signature) ---
+/// Extra entries appended after the beat-based lengths so serialized indices stay valid.
+/// In 4/4, "1 bar" equals 4 beats; in 3/4 it is 3 beats; in 6/8 it is 3 beats.
+constexpr int kNumRiserLengthBars = 3;
+constexpr int kRiserLengthBarsFirstIdx = kNumRiserLengths; ///< First bar-based enum index
+constexpr double kRiserLengthBarsValues[kNumRiserLengthBars] = { 1.0, 2.0, 4.0 };
+constexpr const char* kRiserLengthBarsLabels[kNumRiserLengthBars] = { "1 bar", "2 bars", "4 bars" };
+/// Total Riser Length enum entries (beat-based + bar-based).
+constexpr int kNumRiserLengthEntries = kNumRiserLengths + kNumRiserLengthBars;
+
+/// Resolve a Riser Length enum index to a length in beats.
+/// @param beatsPerBar Beats per bar from the host time signature (4 for 4/4).
+inline double ResolveRiserLengthBeats(int index, double beatsPerBar)
+{
+  if (index < 0)
+    index = 0;
+  if (index >= kNumRiserLengthEntries)
+    index = kNumRiserLengthEntries - 1;
+
+  if (index < kNumRiserLengths)
+    return kRiserLengthValues[index];
+
+  const double bar = beatsPerBar >= 1.0 ? beatsPerBar : 4.0;
+  return kRiserLengthBarsValues[index - kRiserLengthBarsFirstIdx] * bar;
+}
+
 // --- Parameter defaults ---
 constexpr double kLushDefault        = 40.0;   ///< Reverb wet amount (0–100%)
 constexpr double kFadeInDefault      = 60.0;   ///< Fade-in shape (0–100%)
@@ -59,6 +85,97 @@ constexpr double kStutterDepthDefault = 50.0;  ///< Stutter wet/dry (0–100%)
 constexpr double kStutterRateMinHz   = 0.0;    ///< Stutter rate minimum (0 = off)
 constexpr double kStutterRateMaxHz   = 30.0;   ///< Stutter rate maximum in Hz
 constexpr double kStutterRateDefaultHz = 0.0;  ///< Stutter rate default (off)
+
+// --- Reverb character ---
+/// Selects the offline reverb engine/voicing. Matrix is the original RVRSE sound
+/// (Airwindows MatrixVerb); Room/Hall/Plate use the built-in 8-line FDN reverb.
+/// Values are serialized as enum indices, so only ever append new entries.
+enum EReverbCharacter
+{
+  kReverbMatrix = 0, ///< Original RVRSE voicing (Airwindows MatrixVerb)
+  kReverbRoom   = 1, ///< FDN: short, dense, mid-bright
+  kReverbHall   = 2, ///< FDN: long, smooth, darker, lightly modulated
+  kReverbPlate  = 3  ///< FDN: very dense, bright, medium length
+};
+
+constexpr int kNumReverbCharacters = 4;
+constexpr int kReverbCharacterDefault = kReverbMatrix;
+
+// --- Tension (tempo-synced LFO on the riser) ---
+enum ETensionTarget
+{
+  kTensionOff    = 0, ///< No modulation
+  kTensionVolume = 1, ///< LFO modulates riser volume (pulsing)
+  kTensionFilter = 2  ///< LFO modulates a low-pass filter cutoff (breathing)
+};
+
+constexpr int kNumTensionTargets = 3;
+constexpr int kTensionTargetDefault = kTensionOff;
+
+constexpr int kNumTensionRates = 4;
+constexpr int kTensionRateDefault = 1; ///< 1/8 note
+/// LFO period in beats (quarter notes) for each rate entry.
+constexpr double kTensionRateBeats[kNumTensionRates] = { 1.0, 0.5, 0.25, 0.125 };
+constexpr const char* kTensionRateLabels[kNumTensionRates] = { "1/4", "1/8", "1/16", "1/32" };
+
+constexpr double kTensionDepthDefault = 50.0;   ///< Tension depth (0–100%)
+constexpr double kTensionFilterMinHz  = 250.0;  ///< Filter cutoff at full modulation depth (closed)
+constexpr double kTensionFilterMaxHz  = 18000.0; ///< Filter cutoff when fully open
+constexpr int    kTensionFilterUpdateFrames = 16; ///< Filter coefficient update interval (samples)
+
+// --- Last-bar gate (rhythmic chops before the drop) ---
+enum EGateRegion
+{
+  kGateOff         = 0, ///< No gate
+  kGateLastBeat    = 1, ///< Chop the last beat before the drop
+  kGateLastTwoBeats = 2, ///< Chop the last two beats
+  kGateLastBar     = 3  ///< Chop the whole last bar (length from host time signature)
+};
+
+constexpr int kNumGateRegions = 4;
+constexpr int kGateRegionDefault = kGateOff;
+
+constexpr int kNumGateRates = 3;
+constexpr int kGateRateDefault = 1; ///< 1/16 note
+/// Gate step length in beats (quarter notes) for each rate entry.
+constexpr double kGateRateBeats[kNumGateRates] = { 0.5, 0.25, 0.125 };
+constexpr const char* kGateRateLabels[kNumGateRates] = { "1/8", "1/16", "1/32" };
+
+constexpr double kGateDuty   = 0.5;  ///< Fraction of each gate step that is open
+constexpr double kGateRampMs = 2.0;  ///< Gate edge ramp (anti-click), capped to 25% of the open window
+
+// --- Post tail ---
+/// Fade-out applied to the end of the forward reverb tail mixed in after the drop.
+constexpr double kPostTailFadeOutMs = 150.0;
+constexpr float  kPostTailGain      = 1.0f;
+
+// --- Loudness (consistent riser level) ---
+enum ELoudnessMode
+{
+  kLoudnessOff    = 0, ///< No normalization (original behavior)
+  kLoudnessAuto   = 1, ///< Normalize the riser peak to the target on every rebuild
+  kLoudnessLocked = 2  ///< Keep the last Auto gain fixed while settings are tweaked
+};
+
+constexpr int kNumLoudnessModes = 3;
+constexpr int kLoudnessModeDefault = kLoudnessOff;
+constexpr float kLoudnessTargetPeakDb = -3.0f;   ///< Riser peak target in Auto mode
+constexpr float kLoudnessMaxGainDb    = 40.0f;   ///< Upper bound for the normalization gain (quiet samples can need ~30 dB)
+constexpr float kLoudnessMinGainDb    = -24.0f;  ///< Lower bound for the normalization gain
+constexpr float kLoudnessSilencePeak  = 1e-6f;   ///< Below this peak the riser is treated as silent
+
+// --- Presets ---
+/// Manual BPM override: parameter value 0 follows the host; values below the minimum are ignored.
+constexpr double kManualBpmMin = 20.0;
+constexpr double kManualBpmMax = 300.0;
+
+/// Tempo the processor should use: the manual override when set, otherwise the host tempo.
+inline double ResolveEffectiveBpm(double manualBpm, double hostBpm)
+{
+  return manualBpm >= kManualBpmMin ? manualBpm : hostBpm;
+}
+
+constexpr int kNumUserPresets = 15;              ///< Factory presets (excluding the "Init" entry)
 
 // --- Debug Playback Mode ---
 /// Selects which pipeline stage buffer is played back.

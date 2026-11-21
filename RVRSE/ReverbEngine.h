@@ -3,6 +3,8 @@
 /// @file ReverbEngine.h
 /// @brief Engine-agnostic offline reverb seam for the riser pipeline.
 
+#include "Constants.h"
+
 #include <algorithm>
 #include <cstddef>
 
@@ -11,6 +13,7 @@ namespace rvrse {
 struct ReverbSettings
 {
   float mLush = 0.0f;
+  EReverbCharacter mCharacter = kReverbMatrix; ///< Engine/voicing selector (defaults to the original sound)
 };
 
 inline float ClampLush(float lush)

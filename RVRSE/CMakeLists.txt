@@ -16,6 +16,9 @@ iplug_add_plugin(${PROJECT_NAME}
     ReverbEngine.h
     ReverbEngineDevConfig.h
     ReverbEngineFactory.h
+    FdnReverbEngine.h
+    RiserShaping.h
+    Presets.h
     SampleData.h
     SampleLoader.h
     SampleLoader.cpp
@@ -32,7 +35,7 @@ iplug_add_plugin(${PROJECT_NAME}
     resources/img/logo@2x.png
     resources/img/logo@3x.png
   FORMATS
-    MINIMAL_PLUGINS APP
+    VST3  # Personal Windows build: VST3 only (no AU/CLAP/standalone)
 )
 
 # Workaround: iPlug2's CMake only adds main.rc to the APP target on Windows.

@@ -3,6 +3,8 @@
 #include "IPlug_include_in_plug_hdr.h"
 #include "IPlugQueue.h"
 #include "IPlugStructs.h"
+#include "Presets.h"
+#include "RiserShaping.h"
 #include "RvrseProcessor.h"
 #include "SampleData.h"
 #include "Stutter.h"
@@ -31,8 +33,22 @@ enum EParams
   kParamTrimStartMs,
   kParamTrimEndMs,
   kParamRiserReleaseMs,
+  // Added after v1.1.0 — always append, never reorder (indices are serialized).
+  kParamReverbCharacter,
+  kParamTensionTarget,
+  kParamTensionRate,
+  kParamTensionDepth,
+  kParamGateRegion,
+  kParamGateRate,
+  kParamPostTail,
+  kParamLoudness,
+  kParamPreset,
+  kParamManualBpm,   ///< 0 = follow host tempo, 20–300 = manual BPM override
   kNumParams
 };
+
+/// Number of parameters in state chunk versions 1/2 (everything up to Riser Release).
+constexpr int kNumParamsLegacyChunk = kParamRiserReleaseMs + 1;
 
 enum ECtrlTags
 {
@@ -79,6 +95,18 @@ enum ECtrlTags
   kCtrlTagPreviewStop,
   kCtrlTagHitPreview,
   kCtrlTagDropOverlay,
+  // Shape section
+  kCtrlTagShapeSectionLabel,
+  kCtrlTagPreset,
+  kCtrlTagCharacter,
+  kCtrlTagLoudness,
+  kCtrlTagPostTail,
+  kCtrlTagTensionTarget,
+  kCtrlTagTensionRate,
+  kCtrlTagTensionDepth,
+  kCtrlTagGateRegion,
+  kCtrlTagGateRate,
+  kCtrlTagManualBpm,
   kNumCtrlTags
 };
 
@@ -151,6 +179,11 @@ private:
   void QueueSampleLoadError(const char* errorMessage, bool clearLoadedState = false);
   void CommitTrimParameters(double trimStartMs, double trimEndMs);
   void CommitRiserRelease(double releaseMs);
+  /// Apply a factory preset by changing parameters only (never touches the loaded sample).
+  /// UI thread only.
+  void ApplyPreset(int presetIdx);
+  /// Set a parameter from the UI thread and refresh its control + notify the host.
+  void SetParamFromUI(int paramIdx, double value);
   void QueueSequenceForCurrentTrim();
   bool HasPendingRender() const;
   rvrse::TrimRangeFrames GetCommittedTrimRangeForSample(const std::shared_ptr<rvrse::SampleData>& sample) const;
@@ -205,9 +238,13 @@ private:
   rvrse::RvrseProcessor mProcessor;   ///< Offline pipeline orchestrator (reverb → reverse → stretch)
   std::atomic<double> mLastBPM { 0.0 };  ///< Last BPM from host (written by audio thread, read by UI)
   double mLastDisplayedBPM = -1.0;    ///< Last BPM shown in GUI (avoids redundant UI updates)
-  float mLastLush = -1.0f;            ///< Last Lush value sent to processor
+  double mLastRiserReleaseMs = 0.0;   ///< Last Riser Release (ms) sent to processor (host automation sync)
+  float mLastLush = -1.0f;           ///< Last Lush value sent to processor
   double mLastRiserLength = -1.0;     ///< Last Riser Length sent to processor
   int mLastStretchQuality = -1;       ///< Last Stretch Quality sent to processor
+  int mLastReverbCharacter = -1;      ///< Last reverb character sent to processor
+  rvrse::ShapeSettings mLastShape;    ///< Last shape settings sent to processor
+  bool mHasLastShape = false;         ///< Whether mLastShape has been sent at least once
   double mLastTrimStartMs = -1.0;     ///< Last trim start sent to the processor
   double mLastTrimEndMs = -1.0;       ///< Last trim end sent to the processor
   std::atomic<bool> mLegacyTransition { false }; ///< Preserve v1 adaptive riser-tail behavior

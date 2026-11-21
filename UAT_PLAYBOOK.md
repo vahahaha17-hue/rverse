@@ -45,6 +45,29 @@ Run these tests manually after every change to the DSP pipeline or plugin behavi
 | 11 | Trim Start     | 0–30000        | 0         | ms    | 1     |
 | 12 | Trim End       | 0–30000        | 0         | ms    | 1     |
 | 13 | Riser Release  | 0–500          | 50        | ms    | 1     |
+| 14 | Reverb Character | Matrix / Room / Hall / Plate | Matrix | — | enum |
+| 15 | Tension Target | Off / Volume / Filter | Off | — | enum |
+| 16 | Tension Rate   | 1/4, 1/8, 1/16, 1/32 | 1/8 | beat | enum |
+| 17 | Tension Depth  | 0–100          | 50        | %     | 1     |
+| 18 | Gate Region    | Off / Last beat / Last 2 beats / Last bar | Off | — | enum |
+| 19 | Gate Step      | 1/8, 1/16, 1/32 | 1/16 | beat | enum |
+| 20 | Post Tail      | Off / On       | Off       | —     | enum |
+| 21 | Loudness       | Off / Auto / Locked | Off | —   | enum |
+| 22 | Preset         | Init + 15 factory (non-automatable; sets params only) | Init | — | enum |
+| 23 | Manual BPM     | 0 (host) / 20–300 | 0 | BPM | 1 |
+
+Riser Length additionally offers `1 bar`, `2 bars`, `4 bars` (follow the host time signature).
+
+### UAT — SHAPE section (new, unverified on hardware)
+- [ ] Each Reverb Character rebuilds the riser and sounds distinct; sample is not reloaded
+- [ ] 1/2/4 bars in 4/4 and 3/4 (and 6/8) match the host bar length
+- [ ] Tension Volume/Filter pulses on the grid and is fully open on the drop
+- [ ] Gate chops only the chosen region before the drop, no clicks
+- [ ] Post Tail adds a tail after the hit; Loudness Auto raises quiet risers, Locked holds the level
+- [ ] Choosing a preset changes parameters only (loaded sample/trim unchanged) and the controls update
+- [ ] Manual BPM: 0 follows the host; typing e.g. 90 rebuilds the riser at 90 BPM regardless of host tempo
+- [ ] Mouse wheel and Arrow Up/Down change the hovered control (knob, slider, tabs, preset menu); Shift = fine
+- [ ] Projects saved before this change load with defaults for new parameters
 
 ---
 

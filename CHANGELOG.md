@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- SHAPE section (personal "Reverse Bloom"-style features): reverb characters (Matrix, Room, Hall, Plate — the last three use a new 8-line FDN reverb), riser lengths of 1/2/4 bars that follow the host time signature, tempo-synced Tension LFO (volume or low-pass filter, 1/4–1/32, depth), last-beat / last-2-beats / last-bar rhythmic gate (1/8, 1/16, 1/32 steps), Post tail (reverb tail after the hit), loudness Off/Auto/Locked, and 15 factory presets in four categories plus Init
+- Manual BPM box (SHAPE section; 0 = follow host tempo, 20–300 = override) — automatable
+- Mouse wheel and Arrow Up/Down (Shift/Ctrl = fine) step every parameter under the cursor, including tab switches and the preset menu
+- Silver 3D knobs (shadow, lit rim/body, centre dish, orange tick ring) and a light silver/navy/orange theme
+- Windows-only GitHub Actions workflow `windows-vst3.yml` that produces the VST3 as a downloadable artifact
+
+### Changed
+- Riser Release can now be automated by the host (Trim Start/End and Preset stay non-automatable)
+- Plugin is built as VST3 only (AU, CLAP and standalone removed from `RVRSE/CMakeLists.txt`)
+- Editor height increased to 760 px for the SHAPE section
+- Riser Length enum grew from 7 to 10 entries (existing indices unchanged; DAW automation of this parameter may map to different values)
+- State chunk version bumped to 3; v1/v2 projects load with defaults for the new parameters
+
 ## [1.1.0] - 2026-08-02
 
 ### Added
