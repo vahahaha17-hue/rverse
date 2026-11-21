@@ -1,1 +1,40 @@
+name: Windows VST3
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/**, main, develop]
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Download iPlug2 VST3 SDK
+        working-directory: iPlug2/Dependencies/IPlug
+        shell: bash
+        run: ./download-vst3-sdk.sh
+
+      - name: Configure (VS2022)
+        run: cmake --preset windows-vs2022
+
+      - name: Build plugin (Release)
+        run: cmake --build build/windows-vs2022 --config Release
+
+      - name: Build and run DSP tests
+        run: |
+          cmake --build build/windows-vs2022 --config Release --target rvrse_tests
+          ctest --test-dir build/windows-vs2022 -C Release --output-on-failure
+
+      - name: Upload VST3
+        if: success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: RVRSE-Windows-VST3
+          path: build/windows-vs2022/out/*.vst3
+          retention-days: 30
