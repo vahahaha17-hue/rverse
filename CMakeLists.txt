@@ -12,7 +12,6 @@ FetchContent_Declare(
   signalsmith-stretch
   GIT_REPOSITORY https://github.com/Signalsmith-Audio/signalsmith-stretch.git
   GIT_TAG        57b93f4e9206a089a45387eaa39bdc9f310d3308  # main @ 2026-04 (v1.3.2)
-  GIT_SHALLOW    ON
 )
 FetchContent_MakeAvailable(signalsmith-stretch)
 
