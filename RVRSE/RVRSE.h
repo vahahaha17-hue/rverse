@@ -107,6 +107,7 @@ enum ECtrlTags
   kCtrlTagGateRegion,
   kCtrlTagGateRate,
   kCtrlTagManualBpm,
+  kCtrlTagPageTabs,
   kNumCtrlTags
 };
 
@@ -242,6 +243,7 @@ private:
   float mLastLush = -1.0f;           ///< Last Lush value sent to processor
   double mLastRiserLength = -1.0;     ///< Last Riser Length sent to processor
   int mLastStretchQuality = -1;       ///< Last Stretch Quality sent to processor
+  int mActiveTab = 0; ///< Editor page: 0 = RISER, 1 = TAIL (UI only, not saved)
   int mLastReverbCharacter = -1;      ///< Last reverb character sent to processor
   rvrse::ShapeSettings mLastShape;    ///< Last shape settings sent to processor
   bool mHasLastShape = false;         ///< Whether mLastShape has been sent at least once

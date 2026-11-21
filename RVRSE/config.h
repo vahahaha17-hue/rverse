@@ -1,16 +1,16 @@
 #define PLUG_NAME "RVRSE"
-#define PLUG_MFR "SamuFL"
+#define PLUG_MFR "RedBeardFX"
 #define PLUG_VERSION_HEX 0x00010100
 #define PLUG_VERSION_STR "1.1.0"
-#define PLUG_UNIQUE_ID '5SpI'
-#define PLUG_MFR_ID 'SmFL'
+#define PLUG_UNIQUE_ID 'RBrv'
+#define PLUG_MFR_ID 'RBFX'
 #define PLUG_URL_STR "https://samufl.com"
 #define PLUG_EMAIL_STR "info@samufl.com"
 #define PLUG_COPYRIGHT_STR "Copyright 2026 SamuFL"
 #define PLUG_CLASS_NAME RVRSE
 
 #define BUNDLE_NAME "RVRSE"
-#define BUNDLE_MFR "SamuFL"
+#define BUNDLE_MFR "RedBeardFX"
 #define BUNDLE_DOMAIN "com"
 
 #define SHARED_RESOURCES_SUBPATH "RVRSE"
@@ -42,7 +42,7 @@
 
 #define AAX_TYPE_IDS 'ITP1'
 #define AAX_TYPE_IDS_AUDIOSUITE 'ITA1'
-#define AAX_PLUG_MFR_STR "SamuFL"
+#define AAX_PLUG_MFR_STR "RedBeardFX"
 #define AAX_PLUG_NAME_STR "RVRSE\nIPEF"
 #define AAX_PLUG_CATEGORY_STR "Instrument"
 #define AAX_DOES_AUDIOSUITE 0

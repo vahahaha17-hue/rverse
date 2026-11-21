@@ -469,6 +469,31 @@ public:
   }
 };
 
+/// Show the controls of one editor page (0 = RISER, 1 = TAIL) and hide the other.
+void ApplyPageVisibility(IGraphics* pGraphics, int page)
+{
+  if (!pGraphics)
+    return;
+
+  static constexpr int kRiserPageTags[] = {
+    kCtrlTagRiserSectionLabel, kCtrlTagStutterRate, kCtrlTagStutterDepth, kCtrlTagRiserVolume,
+    kCtrlTagOfflineSectionLabel, kCtrlTagLush, kCtrlTagRiserLength, kCtrlTagFadeIn,
+    kCtrlTagRiserRelease, kCtrlTagShapeSectionLabel, kCtrlTagCharacter, kCtrlTagLoudness,
+    kCtrlTagTensionTarget, kCtrlTagTensionRate, kCtrlTagTensionDepth, kCtrlTagGateRegion,
+    kCtrlTagGateRate};
+  static constexpr int kTailPageTags[] = {
+    kCtrlTagHitSectionLabel, kCtrlTagHitVolume, kCtrlTagHitPreview, kCtrlTagPostTail};
+
+  for (const int tag : kRiserPageTags)
+    if (auto* pCtrl = pGraphics->GetControlWithTag(tag))
+      pCtrl->Hide(page != 0);
+  for (const int tag : kTailPageTags)
+    if (auto* pCtrl = pGraphics->GetControlWithTag(tag))
+      pCtrl->Hide(page != 1);
+
+  pGraphics->SetAllControlsDirty();
+}
+
 /// One-button toggle for the post-hit reverb tail: red = tail on, black = tail off.
 class TailButtonControl final : public IControl
 {
@@ -753,8 +778,10 @@ RVRSE::RVRSE(const InstanceInfo& info)
     const float panelTop    = waveformRect.B + gap;
     const float panelBottom = footerRect.T - gap;
     const float panelMid    = b.L + gap + (w - 2.f * gap) * kRiserPanelPct;
-    const IRECT riserRect   = IRECT(b.L + gap, panelTop, panelMid - gap * 0.5f, panelBottom);
-    const IRECT hitRect     = IRECT(panelMid + gap * 0.5f, panelTop, b.R - gap, panelBottom);
+    (void) panelMid;
+    // One main panel; the RISER and TAIL pages share it (page tabs at its top left).
+    const IRECT riserRect   = IRECT(b.L + gap, panelTop, b.R - gap, panelBottom);
+    const IRECT hitRect     = riserRect;
     const auto waveformDisplayBounds = [](const IRECT& rect) {
       return rect.GetPadded(-6.f);
     };
@@ -784,61 +811,65 @@ RVRSE::RVRSE(const InstanceInfo& info)
       return rect.GetFromBottom(headerH * 0.36f).GetCentredInside(240.f, 14.f).GetHShifted(140.f).GetVShifted(-13.f);
     };
 
-    // ── Knob geometry shared by first-time setup and the resize path ───
-    const IRECT riserInner = riserRect.GetPadded(-8.f);
-    const IRECT rtKnobArea = riserInner.GetReducedFromTop(28.f).GetFromTop(150.f);
-    const auto rtKnobBounds = [&](int idx) {
-      return rtKnobArea.GetGridCell(idx, 1, 3).GetCentredInside(130.f, 150.f);
-    };
-    const IRECT offlineArea = riserInner.GetReducedFromTop(184.f);
-    const IRECT offlineLabelBounds = offlineArea.GetFromTop(18.f);
-    const IRECT offlineKnobRow = offlineArea.GetReducedFromTop(22.f).GetFromTop(100.f);
-    const auto offlineKnobBounds = [&](int idx) {
-      return offlineKnobRow.GetGridCell(idx, 1, 4).GetCentredInside(84.f, 100.f);
-    };
-    const IRECT hitInner = hitRect.GetPadded(-8.f);
-    const IRECT hitVolBounds = hitInner.GetReducedFromTop(28.f).GetFromTop(150.f).GetCentredInside(130.f, 150.f);
-    const IRECT hitPreviewArea = hitRect.GetPadded(-10.f).GetReducedFromTop(190.f).GetReducedFromBottom(10.f);
-
-    // ── SHAPE section geometry (below the OFFLINE row, inside the riser panel) ──
-    // Three rows of 48px: [Preset | Character | Loudness | Post tail],
-    // [Tension target | rate | depth], [Gate region | step].
+    // ── Main panel geometry (shared by first-time setup and the resize path) ──
+    // Top strip: [RISER|TAIL tabs] ............ [PRESET] [BPM]
+    // RISER page: left column = real-time + offline knobs, right column = SHAPE controls.
+    // TAIL page: hit volume, tail button and the hit waveform preview.
     struct ShapeLayout
     {
-      IRECT label, preset, character, loudness, postTail;
-      IRECT tensionTarget, tensionRate, tensionDepth;
-      IRECT gateRegion, gateStep, manualBpm;
+      IRECT tabs, preset, manualBpm;
+      IRECT rtLabel, rtKnob[3], offLabel, offKnob[4];
+      IRECT label, character, loudness;
+      IRECT tensionTarget, tensionRate, tensionDepth, gateRegion, gateStep;
+      IRECT hitLabel, hitVol, postTail, hitPreview;
     };
     const ShapeLayout shapeLayout = [&]() {
-      constexpr float kShapeTop = 314.f;   // offset from the padded riser panel top
-      constexpr float kRowH = 48.f;
-      constexpr float kRowGap = 4.f;
-      constexpr float kSlicePad = 3.f;
-      const IRECT area = riserRect.GetPadded(-8.f).GetReducedFromTop(kShapeTop);
-      const auto row = [&](int idx) {
-        const float top = area.T + 22.f + static_cast<float>(idx) * (kRowH + kRowGap);
-        return IRECT(area.L, top, area.R, top + kRowH);
-      };
+      constexpr float kTopH = 44.f;
+      constexpr float kSlicePad = 4.f;
+      const IRECT inner = riserRect.GetPadded(-8.f);
+      const IRECT strip = inner.GetFromTop(kTopH);
+      const IRECT content = inner.GetReducedFromTop(kTopH + 12.f);
+      const IRECT leftCol = content.GetFromLeft(content.W() * 0.52f - 6.f);
+      const IRECT rightCol = content.GetFromRight(content.W() * 0.48f - 6.f);
       const auto slice = [&](const IRECT& r, float a, float c) {
         return IRECT(r.L + r.W() * a + kSlicePad, r.T, r.L + r.W() * c - kSlicePad, r.B);
       };
 
-      const IRECT rowA = row(0);
-      const IRECT rowB = row(1);
-      const IRECT rowC = row(2);
-
       ShapeLayout l;
-      l.label         = IRECT(area.L, area.T, area.R, area.T + 18.f);
-      l.preset        = slice(rowA, 0.00f, 0.29f);
-      l.character     = slice(rowA, 0.29f, 0.62f);
-      l.loudness      = slice(rowA, 0.62f, 0.84f);
-      l.postTail      = slice(rowA, 0.84f, 1.00f);
-      l.tensionTarget = slice(rowB, 0.00f, 0.29f);
-      l.tensionRate   = slice(rowB, 0.29f, 0.62f);
-      l.tensionDepth  = slice(rowB, 0.62f, 1.00f);
-      l.gateRegion    = slice(rowC, 0.00f, 0.38f);
-      l.gateStep      = slice(rowC, 0.38f, 0.67f);
-      l.manualBpm     = slice(rowC, 0.67f, 1.00f);
+      l.tabs      = strip.GetFromLeft(240.f);
+      l.manualBpm = strip.GetFromRight(220.f);
+      l.preset    = strip.GetFromRight(220.f + 12.f + 290.f).GetFromLeft(290.f);
+
+      // RISER page, left column
+      l.rtLabel = leftCol.GetFromTop(20.f);
+      const IRECT rtRow = leftCol.GetReducedFromTop(26.f).GetFromTop(150.f);
+      for (int i = 0; i < 3; ++i)
+        l.rtKnob[i] = rtRow.GetGridCell(i, 1, 3).GetCentredInside(130.f, 150.f);
+      l.offLabel = leftCol.GetReducedFromTop(190.f).GetFromTop(18.f);
+      const IRECT offRow = leftCol.GetReducedFromTop(214.f).GetFromTop(120.f);
+      for (int i = 0; i < 4; ++i)
+        l.offKnob[i] = offRow.GetGridCell(i, 1, 4).GetCentredInside(96.f, 120.f);
+
+      // RISER page, right column (SHAPE): four rows of 54 px
+      l.label = rightCol.GetFromTop(18.f);
+      const auto row = [&](int idx) {
+        const float top = rightCol.T + 26.f + static_cast<float>(idx) * 62.f;
+        return IRECT(rightCol.L, top, rightCol.R, top + 54.f);
+      };
+      l.character     = slice(row(0), 0.00f, 0.62f);
+      l.loudness      = slice(row(0), 0.62f, 1.00f);
+      l.tensionTarget = slice(row(1), 0.00f, 0.38f);
+      l.tensionRate   = slice(row(1), 0.38f, 1.00f);
+      l.tensionDepth  = slice(row(2), 0.00f, 1.00f);
+      l.gateRegion    = slice(row(3), 0.00f, 0.55f);
+      l.gateStep      = slice(row(3), 0.55f, 1.00f);
+
+      // TAIL page
+      const IRECT tailLeft = content.GetFromLeft(200.f);
+      l.hitVol     = tailLeft.GetFromTop(150.f).GetCentredInside(130.f, 150.f);
+      l.postTail   = tailLeft.GetReducedFromTop(170.f).GetFromTop(60.f).GetCentredInside(80.f, 60.f);
+      l.hitLabel   = content.GetReducedFromLeft(220.f).GetFromTop(20.f);
+      l.hitPreview = content.GetReducedFromLeft(220.f).GetReducedFromTop(26.f).GetFromTop(280.f);
       return l;
     }();
 
@@ -866,46 +897,34 @@ RVRSE::RVRSE(const InstanceInfo& info)
       pGraphics->GetControlWithTag(kCtrlTagSampleName)->SetTargetAndDrawRECTs(sampleBounds);
       const IRECT bpmBounds = headerRect.GetPadded(-8.f).GetFromRight(300.f).GetFromBottom(headerH * 0.4f);
       pGraphics->GetControlWithTag(kCtrlTagBPMDisplay)->SetTargetAndDrawRECTs(bpmBounds);
-      const IRECT versionBounds = footerRect.GetPadded(-8.f).GetFromRight(200.f);
-      pGraphics->GetControlWithTag(kCtrlTagVersionNumber)->SetTargetAndDrawRECTs(versionBounds);
-      // Footer: master vol slider + MIDI indicator
-      const IRECT masterArea = footerRect.GetPadded(-8.f).GetFromLeft(220.f);
-      const IRECT masterLabelRow = masterArea.GetFromTop(22.f);
-      const IRECT masterSliderBounds = masterArea.GetReducedFromTop(20.f).GetCentredInside(200.f, 24.f);
-      pGraphics->GetControlWithTag(kCtrlTagMasterVolLabel)->SetTargetAndDrawRECTs(masterLabelRow.GetFromLeft(110.f));
-      pGraphics->GetControlWithTag(kCtrlTagMasterVolValue)->SetTargetAndDrawRECTs(masterLabelRow.GetFromRight(110.f));
-      pGraphics->GetControlWithTag(kCtrlTagMasterVolSlider)->SetTargetAndDrawRECTs(masterSliderBounds);
-      const IRECT midiBounds = footerRect.GetPadded(-8.f).GetMidHPadded(30.f);
-      pGraphics->GetControlWithTag(kCtrlTagMidiIndicator)->SetTargetAndDrawRECTs(midiBounds);
-      // Riser panel contents
-      const IRECT riserLabelBounds = riserRect.GetPadded(-8.f).GetFromTop(20.f);
-      pGraphics->GetControlWithTag(kCtrlTagRiserSectionLabel)->SetTargetAndDrawRECTs(riserLabelBounds);
-      pGraphics->GetControlWithTag(kCtrlTagStutterRate)->SetTargetAndDrawRECTs(rtKnobBounds(0));
-      pGraphics->GetControlWithTag(kCtrlTagStutterDepth)->SetTargetAndDrawRECTs(rtKnobBounds(1));
-      pGraphics->GetControlWithTag(kCtrlTagRiserVolume)->SetTargetAndDrawRECTs(rtKnobBounds(2));
-      // Offline section
-      pGraphics->GetControlWithTag(kCtrlTagOfflineSectionLabel)->SetTargetAndDrawRECTs(offlineLabelBounds);
-      pGraphics->GetControlWithTag(kCtrlTagLush)->SetTargetAndDrawRECTs(offlineKnobBounds(0));
-      pGraphics->GetControlWithTag(kCtrlTagRiserLength)->SetTargetAndDrawRECTs(offlineKnobBounds(1));
-      pGraphics->GetControlWithTag(kCtrlTagFadeIn)->SetTargetAndDrawRECTs(offlineKnobBounds(2));
-      pGraphics->GetControlWithTag(kCtrlTagRiserRelease)->SetTargetAndDrawRECTs(offlineKnobBounds(3));
-      // Shape section
-      pGraphics->GetControlWithTag(kCtrlTagShapeSectionLabel)->SetTargetAndDrawRECTs(shapeLayout.label);
+      // Footer is empty (master volume, version label and MIDI dot removed)
+      // Page tabs, preset and manual BPM (top strip)
+      pGraphics->GetControlWithTag(kCtrlTagPageTabs)->SetTargetAndDrawRECTs(shapeLayout.tabs);
       pGraphics->GetControlWithTag(kCtrlTagPreset)->SetTargetAndDrawRECTs(shapeLayout.preset);
+      pGraphics->GetControlWithTag(kCtrlTagManualBpm)->SetTargetAndDrawRECTs(shapeLayout.manualBpm);
+      // RISER page
+      pGraphics->GetControlWithTag(kCtrlTagRiserSectionLabel)->SetTargetAndDrawRECTs(shapeLayout.rtLabel);
+      pGraphics->GetControlWithTag(kCtrlTagStutterRate)->SetTargetAndDrawRECTs(shapeLayout.rtKnob[0]);
+      pGraphics->GetControlWithTag(kCtrlTagStutterDepth)->SetTargetAndDrawRECTs(shapeLayout.rtKnob[1]);
+      pGraphics->GetControlWithTag(kCtrlTagRiserVolume)->SetTargetAndDrawRECTs(shapeLayout.rtKnob[2]);
+      pGraphics->GetControlWithTag(kCtrlTagOfflineSectionLabel)->SetTargetAndDrawRECTs(shapeLayout.offLabel);
+      pGraphics->GetControlWithTag(kCtrlTagLush)->SetTargetAndDrawRECTs(shapeLayout.offKnob[0]);
+      pGraphics->GetControlWithTag(kCtrlTagRiserLength)->SetTargetAndDrawRECTs(shapeLayout.offKnob[1]);
+      pGraphics->GetControlWithTag(kCtrlTagFadeIn)->SetTargetAndDrawRECTs(shapeLayout.offKnob[2]);
+      pGraphics->GetControlWithTag(kCtrlTagRiserRelease)->SetTargetAndDrawRECTs(shapeLayout.offKnob[3]);
+      pGraphics->GetControlWithTag(kCtrlTagShapeSectionLabel)->SetTargetAndDrawRECTs(shapeLayout.label);
       pGraphics->GetControlWithTag(kCtrlTagCharacter)->SetTargetAndDrawRECTs(shapeLayout.character);
       pGraphics->GetControlWithTag(kCtrlTagLoudness)->SetTargetAndDrawRECTs(shapeLayout.loudness);
-      pGraphics->GetControlWithTag(kCtrlTagPostTail)->SetTargetAndDrawRECTs(shapeLayout.postTail);
       pGraphics->GetControlWithTag(kCtrlTagTensionTarget)->SetTargetAndDrawRECTs(shapeLayout.tensionTarget);
       pGraphics->GetControlWithTag(kCtrlTagTensionRate)->SetTargetAndDrawRECTs(shapeLayout.tensionRate);
       pGraphics->GetControlWithTag(kCtrlTagTensionDepth)->SetTargetAndDrawRECTs(shapeLayout.tensionDepth);
       pGraphics->GetControlWithTag(kCtrlTagGateRegion)->SetTargetAndDrawRECTs(shapeLayout.gateRegion);
       pGraphics->GetControlWithTag(kCtrlTagGateRate)->SetTargetAndDrawRECTs(shapeLayout.gateStep);
-      pGraphics->GetControlWithTag(kCtrlTagManualBpm)->SetTargetAndDrawRECTs(shapeLayout.manualBpm);
-      // Hit panel
-      const IRECT hitLabelBounds = hitRect.GetPadded(-8.f).GetFromTop(20.f);
-      pGraphics->GetControlWithTag(kCtrlTagHitSectionLabel)->SetTargetAndDrawRECTs(hitLabelBounds);
-      pGraphics->GetControlWithTag(kCtrlTagHitVolume)->SetTargetAndDrawRECTs(hitVolBounds);
-      pGraphics->GetControlWithTag(kCtrlTagHitPreview)->SetTargetAndDrawRECTs(hitPreviewArea);
+      // TAIL page
+      pGraphics->GetControlWithTag(kCtrlTagHitSectionLabel)->SetTargetAndDrawRECTs(shapeLayout.hitLabel);
+      pGraphics->GetControlWithTag(kCtrlTagHitVolume)->SetTargetAndDrawRECTs(shapeLayout.hitVol);
+      pGraphics->GetControlWithTag(kCtrlTagPostTail)->SetTargetAndDrawRECTs(shapeLayout.postTail);
+      pGraphics->GetControlWithTag(kCtrlTagHitPreview)->SetTargetAndDrawRECTs(shapeLayout.hitPreview);
       pGraphics->GetControlWithTag(kCtrlTagDropOverlay)->SetTargetAndDrawRECTs(b);
       return;
     }
@@ -1069,57 +1088,11 @@ RVRSE::RVRSE(const InstanceInfo& info)
     pGraphics->AttachControl(new ITextControl(bpmBounds, "BPM: —",
       IText(14, kColorOnDarkMuted, "Roboto-Regular", EAlign::Far, EVAlign::Middle)), kCtrlTagBPMDisplay);
 
-    // Version string (footer — right)
-    const IRECT versionBounds = footerRect.GetPadded(-8.f).GetFromRight(200.f);
-    pGraphics->AttachControl(new ITextControl(versionBounds, "RVRSE v" PLUG_VERSION_STR,
-      IText(13, kColorOnDark, "Roboto-Regular", EAlign::Far)), kCtrlTagVersionNumber);
-
     // ── Footer contents ─────────────────────────────────────────────────
-    // Master Volume horizontal slider (left side of footer)
-    // Master volume: label + value above, slider below
-    const IRECT masterArea = footerRect.GetPadded(-8.f).GetFromLeft(220.f);
-    const IRECT masterLabelRow = masterArea.GetFromTop(22.f);
-    const IRECT masterSliderBounds = masterArea.GetReducedFromTop(20.f).GetCentredInside(200.f, 24.f);
-
-    pGraphics->AttachControl(new ITextControl(masterLabelRow.GetFromLeft(110.f), "VOLUME",
-      IText(14, kColorOnDark, "Roboto-Regular", EAlign::Center, EVAlign::Middle)), kCtrlTagMasterVolLabel);
-    pGraphics->AttachControl(new ITextControl(masterLabelRow.GetFromRight(110.f), "100%",
-      IText(14, kColorOnDarkMuted, "Roboto-Regular", EAlign::Center, EVAlign::Middle)), kCtrlTagMasterVolValue);
-
-    const IVStyle sliderStyle = DEFAULT_STYLE
-      .WithColor(kFG, kColorGold)
-      .WithColor(kBG, IColor(0, 0, 0, 0))
-      .WithColor(kFR, kColorKnobTrack)
-      .WithColor(kX1, kColorGold)
-      .WithColor(kHL, kColorGold.WithOpacity(0.15f))
-      .WithDrawFrame(false)
-      .WithDrawShadows(false)
-      .WithEmboss(false)
-      .WithShowLabel(false)
-      .WithShowValue(false)
-      .WithRoundness(1.f);
-
-    pGraphics->AttachControl(new IVSliderControl(masterSliderBounds, kParamMasterVol,
-      "", sliderStyle, true, EDirection::Horizontal, DEFAULT_GEARING, 8.f, 2.f), kCtrlTagMasterVolSlider);
-
-    // MIDI indicator (center of footer) — blue dot, lights up on MIDI input
-    const IRECT midiBounds = footerRect.GetPadded(-8.f).GetMidHPadded(30.f);
-    pGraphics->AttachControl(new ILambdaControl(midiBounds,
-      [](ILambdaControl* pCaller, IGraphics& g, IRECT& r) {
-        const float dotR = 4.f;
-        const float cx = r.MW();
-        const float cy = r.MH();
-        const float opacity = 0.15f + 0.85f * static_cast<float>(pCaller->GetValue());
-        g.FillCircle(rvrse::gui::kColorBlue.WithOpacity(opacity), cx, cy, dotR);
-        const IText label(11, rvrse::gui::kColorTextPrimary, "Roboto-Regular", EAlign::Center, EVAlign::Top);
-        IRECT textR = r.GetFromBottom(12.f);
-        g.DrawText(label, "MIDI", textR);
-      }, DEFAULT_ANIMATION_DURATION, false, false), kCtrlTagMidiIndicator);
 
     // ── Riser panel contents ────────────────────────────────────────────
     // Section label at top of riser panel
-    const IRECT riserLabelBounds = riserRect.GetPadded(-8.f).GetFromTop(20.f);
-    pGraphics->AttachControl(new ITextControl(riserLabelBounds, "RISER — REAL-TIME",
+    pGraphics->AttachControl(new ITextControl(shapeLayout.rtLabel, "RISER — REAL-TIME",
       IText(17, kColorGold, "Roboto-Bold", EAlign::Near, EVAlign::Middle)), kCtrlTagRiserSectionLabel);
 
     // Knob style: solid gold body for real-time knobs
@@ -1142,16 +1115,16 @@ RVRSE::RVRSE(const InstanceInfo& info)
       .WithLabelText(IText(14, kColorTextSecondary, "Roboto-Bold", EAlign::Center, EVAlign::Bottom))
       .WithValueText(IText(14, kColorTextSecondary, "Roboto-Regular", EAlign::Center, EVAlign::Top));
 
-    pGraphics->AttachControl(new SilverKnobControl(rtKnobBounds(0), kParamStutterRate,
+    pGraphics->AttachControl(new SilverKnobControl(shapeLayout.rtKnob[0], kParamStutterRate,
       "RATE", knobStyle, true), kCtrlTagStutterRate);
-    pGraphics->AttachControl(new SilverKnobControl(rtKnobBounds(1), kParamStutterDepth,
+    pGraphics->AttachControl(new SilverKnobControl(shapeLayout.rtKnob[1], kParamStutterDepth,
       "DEPTH", knobStyle, true), kCtrlTagStutterDepth);
-    pGraphics->AttachControl(new SilverKnobControl(rtKnobBounds(2), kParamRiserVolume,
+    pGraphics->AttachControl(new SilverKnobControl(shapeLayout.rtKnob[2], kParamRiserVolume,
       "VOLUME", knobStyle, true), kCtrlTagRiserVolume);
 
     // ── Riser panel: offline section ────────────────────────────────────
     // Offline section label
-    pGraphics->AttachControl(new ITextControl(offlineLabelBounds, "OFFLINE",
+    pGraphics->AttachControl(new ITextControl(shapeLayout.offLabel, "OFFLINE",
       IText(17, kColorSteel, "Roboto-Bold", EAlign::Near, EVAlign::Middle)), kCtrlTagOfflineSectionLabel);
 
     // Steel knob style for offline params (smaller widget)
@@ -1164,14 +1137,14 @@ RVRSE::RVRSE(const InstanceInfo& info)
       .WithColor(kPR, kColorWhite)
       .WithWidgetFrac(0.8f);
 
-    pGraphics->AttachControl(new SilverKnobControl(offlineKnobBounds(0), kParamLush,
+    pGraphics->AttachControl(new SilverKnobControl(shapeLayout.offKnob[0], kParamLush,
       "LUSH", offlineKnobStyle, true), kCtrlTagLush);
-    pGraphics->AttachControl(new SilverKnobControl(offlineKnobBounds(1), kParamRiserLength,
+    pGraphics->AttachControl(new SilverKnobControl(shapeLayout.offKnob[1], kParamRiserLength,
       "LENGTH", offlineKnobStyle, true), kCtrlTagRiserLength);
-    pGraphics->AttachControl(new SilverKnobControl(offlineKnobBounds(2), kParamFadeIn,
+    pGraphics->AttachControl(new SilverKnobControl(shapeLayout.offKnob[2], kParamFadeIn,
       "FADE IN", offlineKnobStyle, true), kCtrlTagFadeIn);
     pGraphics->AttachControl(new ReleaseKnobControl(
-      offlineKnobBounds(3), kParamRiserReleaseMs, offlineKnobStyle,
+      shapeLayout.offKnob[3], kParamRiserReleaseMs, offlineKnobStyle,
       [this](double releaseMs) { CommitRiserRelease(releaseMs); }
     ), kCtrlTagRiserRelease);
 
@@ -1193,6 +1166,14 @@ RVRSE::RVRSE(const InstanceInfo& info)
       .WithValueText(IText(10, kColorTextPrimary, "Roboto-Regular", EAlign::Center, EVAlign::Middle));
 
     // Stretch quality is not exposed: High (the default) is always used from the UI.
+
+    // Larger, orange-accent style for the RISER | TAIL page tabs
+    const IVStyle pageTabStyle = toggleStyle
+      .WithColor(kX1, kColorGold)
+      .WithColor(kFR, kColorGold)
+      .WithShowLabel(false)
+      .WithWidgetFrac(1.f)
+      .WithValueText(IText(15, kColorTextPrimary, "Roboto-Bold", EAlign::Center, EVAlign::Middle));
 
     // ── Riser panel: SHAPE section (preset, character, tension LFO, gate) ──
     pGraphics->AttachControl(new ITextControl(shapeLayout.label, "SHAPE",
@@ -1246,8 +1227,7 @@ RVRSE::RVRSE(const InstanceInfo& info)
 
     // ── Hit panel contents ──────────────────────────────────────────────
     // Section label
-    const IRECT hitLabelBounds = hitRect.GetPadded(-8.f).GetFromTop(20.f);
-    pGraphics->AttachControl(new ITextControl(hitLabelBounds, "HIT",
+    pGraphics->AttachControl(new ITextControl(shapeLayout.hitLabel, "HIT / TAIL",
       IText(17, kColorBlue, "Roboto-Bold", EAlign::Near, EVAlign::Middle)), kCtrlTagHitSectionLabel);
 
     // Hit Volume knob (blue accent — blue body)
@@ -1259,18 +1239,31 @@ RVRSE::RVRSE(const InstanceInfo& info)
       .WithColor(kHL, kColorBlue)
       .WithColor(kPR, kColorBlue);
 
-    pGraphics->AttachControl(new SilverKnobControl(hitVolBounds, kParamHitVolume,
+    pGraphics->AttachControl(new SilverKnobControl(shapeLayout.hitVol, kParamHitVolume,
       "VOLUME", hitKnobStyle, true), kCtrlTagHitVolume);
 
     // Hit waveform preview — between volume knob and bottom area
     // Hit waveform preview — below the volume knob
-    pGraphics->AttachControl(new rvrse::HitPreviewControl(hitPreviewArea), kCtrlTagHitPreview);
+    pGraphics->AttachControl(new rvrse::HitPreviewControl(shapeLayout.hitPreview), kCtrlTagHitPreview);
     if (auto* pHitPreview = static_cast<rvrse::HitPreviewControl*>(pGraphics->GetControlWithTag(kCtrlTagHitPreview)))
     {
       pHitPreview->SetTrimCommitCallback([this](double trimStartMs, double trimEndMs) {
         CommitTrimParameters(trimStartMs, trimEndMs);
       });
     }
+
+    // Page tabs (RISER | TAIL): switch which group of controls is visible.
+    pGraphics->AttachControl(new IVTabSwitchControl(shapeLayout.tabs,
+      [this](IControl* pCaller) {
+        mActiveTab = pCaller->As<ISwitchControlBase>()->GetSelectedIdx();
+        ApplyPageVisibility(pCaller->GetUI(), mActiveTab);
+      },
+      {"RISER", "TAIL"}, "", pageTabStyle, EVShape::Rectangle, EDirection::Horizontal),
+      kCtrlTagPageTabs);
+    pGraphics->GetControlWithTag(kCtrlTagPageTabs)->SetValue(mActiveTab == 0 ? 0.0 : 1.0);
+    // The separate HIT panel background is not used any more (one main panel).
+    pGraphics->GetControlWithTag(kCtrlTagHitPanel)->Hide(true);
+    ApplyPageVisibility(pGraphics, mActiveTab);
 
     // Purely decorative/read-only controls should not swallow file drops.
     for (const int tag : {
